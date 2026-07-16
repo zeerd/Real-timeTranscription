@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -14,6 +15,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -23,19 +26,23 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.zeerd.real_timetranscriptionapp.ui.theme.RealtimeTranscriptionAppTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private val TAG = "MainActivity"
     private val transcriptions = mutableStateListOf<String>()
     private val isRecording = mutableStateOf(false)
     private val volumeLevel = mutableStateOf(0f)
+    private val saveLocationDescription = mutableStateOf("")
     
     private val audioChannel = Channel<ByteArray>(100)
     private val transcriptionChannel = Channel<FloatArray>(Channel.CONFLATED)
     
     private var whisperWrapper: WhisperWrapper? = null
+    private lateinit var fileManager: TranscriptionFileManager
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -53,14 +60,40 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Log.d(TAG, "onCreate")
+        
+        fileManager = TranscriptionFileManager(this)
+        saveLocationDescription.value = fileManager.getCurrentSaveLocation()
+        
         enableEdgeToEdge()
         setContent {
             RealtimeTranscriptionAppTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                val createDocumentLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.CreateDocument("text/plain")
+                ) { uri ->
+                    if (uri != null) {
+                        lifecycleScope.launch {
+                            fileManager.setUserSelectedUri(uri)
+                            saveLocationDescription.value = fileManager.getCurrentSaveLocation()
+                            Log.d(TAG, "User selected save file: $uri")
+                        }
+                    }
+                }
+
+                Scaffold(
+                    modifier = Modifier.fillMaxSize(),
+                    floatingActionButton = {
+                        FloatingActionButton(onClick = {
+                            createDocumentLauncher.launch("transcription_${System.currentTimeMillis()}.txt")
+                        }) {
+                            Icon(Icons.Default.Save, contentDescription = "Set Save File")
+                        }
+                    }
+                ) { innerPadding ->
                     TranscriptionScreen(
                         transcriptions = transcriptions,
                         isRecording = isRecording.value,
                         volumeLevel = volumeLevel.value,
+                        saveLocation = saveLocationDescription.value,
                         modifier = Modifier.padding(innerPadding)
                     )
                 }
@@ -82,59 +115,70 @@ class MainActivity : ComponentActivity() {
 
     private fun startAudioPipeline() {
         Log.d(TAG, "Starting audio pipeline...")
-        val vadWrapper = try {
-            SileroVadWrapper(this)
-        } catch (e: Exception) {
-            val msg = "Error loading VAD model: ${e.message}"
-            Log.e(TAG, "[UI_MSG] $msg", e)
-            transcriptions.add(0, msg)
-            return
-        }
-
-        whisperWrapper = try {
-            WhisperWrapper(this)
-        } catch (e: Exception) {
-            val msg = "Whisper model error: ${e.message}. Please follow README instructions."
-            Log.e(TAG, "[UI_MSG] $msg", e)
-            transcriptions.add(0, msg)
-            null
-        }
-
-        val recorder = AudioRecorder(audioChannel)
-        val pipeline = TranscriptionPipeline(audioChannel, vadWrapper, transcriptionChannel)
-
+        
         lifecycleScope.launch {
-            pipeline.vadState.collect { state ->
-                Log.d(TAG, "VAD State update: $state")
-                isRecording.value = (state == VadState.RECORDING)
+            // Move heavy initialization to IO dispatcher to avoid freezing the Main Thread
+            val initialized = withContext(Dispatchers.IO) {
+                try {
+                    Log.d(TAG, "Initializing VAD on background thread...")
+                    val vad = SileroVadWrapper(this@MainActivity)
+                    
+                    Log.d(TAG, "Initializing Whisper on background thread (copying files if needed)...")
+                    val whisper = WhisperWrapper(this@MainActivity)
+                    
+                    whisperWrapper = whisper
+                    vad to whisper
+                } catch (t: Throwable) {
+                    val msg = "Initialization failed: ${t.message}"
+                    Log.e(TAG, "[FATAL_ERROR] $msg", t)
+                    withContext(Dispatchers.Main) {
+                        transcriptions.add(0, msg)
+                    }
+                    null
+                }
             }
-        }
 
-        lifecycleScope.launch {
-            Log.d(TAG, "Launching AudioRecorder coroutine")
-            recorder.startRecording()
-        }
+            if (initialized != null) {
+                val (vadWrapper, whisper) = initialized
+                Log.d(TAG, "Components initialized, starting processing...")
 
-        lifecycleScope.launch {
-            Log.d(TAG, "Launching TranscriptionPipeline coroutine")
-            pipeline.startProcessing()
-        }
+                val recorder = AudioRecorder(audioChannel)
+                val pipeline = TranscriptionPipeline(audioChannel, vadWrapper, transcriptionChannel)
 
-        lifecycleScope.launch {
-            Log.d(TAG, "Launching Transcription results loop")
-            for (speech in transcriptionChannel) {
-                val wrapper = whisperWrapper
-                if (wrapper != null) {
-                    Log.d(TAG, "Received speech segment (${speech.size} samples), calling Whisper...")
-                    transcriptions.add(0, "Transcribing...")
-                    val result = wrapper.transcribe(speech)
-                    transcriptions.removeAt(0)
-                    transcriptions.add(0, result)
-                    Log.d(TAG, "[UI_MSG] Transcription added: $result")
-                } else {
-                    val msg = "Captured segment: ${"%.1f".format(speech.size / 16000f)}s (Model missing)"
-                    Log.w(TAG, "[UI_MSG] $msg")
-                    transcriptions.add(0, msg)
+                launch {
+                    pipeline.vadState.collect { state ->
+                        Log.d(TAG, "VAD State update: $state")
+                        isRecording.value = (state == VadState.RECORDING)
+                    }
+                }
+
+                launch {
+                    Log.d(TAG, "Launching AudioRecorder coroutine")
+                    recorder.startRecording()
+                }
+
+                launch {
+                    Log.d(TAG, "Launching TranscriptionPipeline coroutine")
+                    pipeline.startProcessing()
+                }
+
+                launch {
+                    Log.d(TAG, "Launching Transcription results loop")
+                    for (speech in transcriptionChannel) {
+                        Log.d(TAG, "Received speech segment (${speech.size} samples), calling Whisper...")
+                        transcriptions.add(0, "Transcribing...")
+                        val result = withContext(Dispatchers.Default) {
+                            whisper.transcribe(speech)
+                        }
+                        transcriptions.removeAt(0)
+                        transcriptions.add(0, result)
+                        Log.d(TAG, "[UI_MSG] Transcription added: $result")
+                        
+                        // Auto-save to file
+                        launch {
+                            fileManager.saveTranscription(result)
+                        }
+                    }
                 }
             }
         }
@@ -152,14 +196,33 @@ fun TranscriptionScreen(
     transcriptions: List<String>,
     isRecording: Boolean,
     volumeLevel: Float,
+    saveLocation: String,
     modifier: Modifier = Modifier
 ) {
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
         Text(
             text = "Real-time Transcription (Local)",
             style = MaterialTheme.typography.headlineMedium,
-            modifier = Modifier.padding(bottom = 16.dp)
+            modifier = Modifier.padding(bottom = 8.dp)
         )
+        
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(
+                    text = "Saving to:",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                )
+                Text(
+                    text = saveLocation,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                )
+            }
+        }
         
         StatusCard(isRecording, volumeLevel)
         

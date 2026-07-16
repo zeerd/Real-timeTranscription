@@ -31,7 +31,7 @@ class AudioRecorder(private val audioChannel: Channel<ByteArray>) {
         
         val recorder = try {
             AudioRecord(
-                MediaRecorder.AudioSource.MIC,
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
                 Constants.SAMPLE_RATE,
                 Constants.CHANNEL_CONFIG,
                 Constants.AUDIO_FORMAT,

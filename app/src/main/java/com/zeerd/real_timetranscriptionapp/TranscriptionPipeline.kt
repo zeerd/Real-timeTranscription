@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import java.util.LinkedList
 
 class TranscriptionPipeline(
     private val audioChannel: Channel<ByteArray>,
@@ -19,9 +20,12 @@ class TranscriptionPipeline(
 
     private var silenceCount = 0
     private val speechBuffer = mutableListOf<Float>()
+    
+    // Pre-roll buffer to avoid losing the first few characters
+    private val preRollBuffer = LinkedList<FloatArray>()
 
     suspend fun startProcessing() = withContext(Dispatchers.Default) {
-        Log.d(TAG, "TranscriptionPipeline started processing")
+        Log.d(TAG, "TranscriptionPipeline started processing with pre-roll support")
         try {
             while (isActive) {
                 val byteBuffer = audioChannel.receive()
@@ -32,11 +36,25 @@ class TranscriptionPipeline(
 
                 when (_vadState.value) {
                     VadState.IDLE -> {
+                        // Maintain pre-roll buffer
+                        preRollBuffer.addLast(floatFrame)
+                        if (preRollBuffer.size > Constants.PRE_SPEECH_BUFFER_FRAMES) {
+                            preRollBuffer.removeFirst()
+                        }
+
                         if (isSpeech) {
                             Log.d(TAG, "Speech detected (prob: $probability), transition IDLE -> RECORDING")
                             _vadState.value = VadState.RECORDING
-                            speechBuffer.addAll(floatFrame.toList())
+                            
+                            // 1. Prepend pre-roll buffer
+                            speechBuffer.clear()
+                            preRollBuffer.forEach { frame ->
+                                speechBuffer.addAll(frame.toList())
+                            }
+                            // Note: floatFrame is already in preRollBuffer and added above
+                            
                             silenceCount = 0
+                            preRollBuffer.clear()
                         }
                     }
                     VadState.RECORDING -> {
@@ -52,13 +70,19 @@ class TranscriptionPipeline(
 
                         if (shouldCutNatural || shouldCutForce) {
                             val reason = if (shouldCutNatural) "natural silence" else "max duration"
-                            Log.d(TAG, "Cut triggered by $reason. Samples: ${speechBuffer.size}. Transition RECORDING -> IDLE")
                             
-                            transcriptionChannel.send(speechBuffer.toFloatArray())
+                            if (speechBuffer.size >= Constants.MIN_SPEECH_DURATION_SAMPLES) {
+                                Log.d(TAG, "Cut triggered by $reason. Samples: ${speechBuffer.size}. Sending to transcription.")
+                                transcriptionChannel.send(speechBuffer.toFloatArray())
+                            } else {
+                                Log.d(TAG, "Cut triggered by $reason, but segment too short (${speechBuffer.size} samples). Discarding.")
+                            }
+                            
                             speechBuffer.clear()
                             _vadState.value = VadState.IDLE
                             silenceCount = 0
                             vadWrapper.reset()
+                            preRollBuffer.clear()
                         }
                     }
                 }

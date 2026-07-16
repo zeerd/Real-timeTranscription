@@ -52,6 +52,7 @@ dependencies {
     implementation(libs.onnx.ext)
     implementation(libs.sherpa.onnx)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.compose.icons)
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)

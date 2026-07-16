@@ -61,7 +61,8 @@ class WhisperWrapper(context: Context) {
                     language = "zh",
                     task = "transcribe"
                 )
-            }
+            },
+            decodingMethod = "greedy_search"
         )
         
         try {
@@ -98,6 +99,9 @@ class WhisperWrapper(context: Context) {
         Log.d(TAG, "Transcribing ${audioData.size} samples...")
         return try {
             val sample = recognizer.createStream()
+            // Force Simplified Chinese using initial prompt
+            sample.setOption("prompt", "简体中文")
+
             sample.acceptWaveform(audioData, 16000)
             recognizer.decode(sample)
             val result = recognizer.getResult(sample)

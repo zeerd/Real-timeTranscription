@@ -51,6 +51,8 @@ dependencies {
     implementation(libs.onnx.android)
     implementation(libs.onnx.ext)
     implementation(libs.sherpa.onnx)
+    implementation("androidx.navigation:navigation-compose:2.8.5")
+    implementation("androidx.documentfile:documentfile:1.0.1")
     implementation(libs.androidx.compose.material3)
     implementation(libs.compose.icons)
     implementation(libs.androidx.compose.ui)

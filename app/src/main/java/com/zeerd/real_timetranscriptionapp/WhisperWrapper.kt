@@ -10,33 +10,31 @@ import com.k2fsa.sherpa.onnx.OfflineWhisperModelConfig
 import java.io.File
 import java.io.FileOutputStream
 
-class WhisperWrapper(context: Context) {
+class WhisperWrapper(context: Context, modelId: String, modelDir: File) {
     private val recognizer: OfflineRecognizer
     private val TAG = "WhisperWrapper"
 
     init {
-        Log.d(TAG, "Initializing WhisperWrapper...")
-        // Copy models from assets to files directory if they don't exist
-        val assetsDir = "whisper-tiny"
-        val filesDir = context.filesDir.absolutePath + "/whisper-tiny"
-        val dir = File(filesDir)
-        if (!dir.exists()) {
-            val created = dir.mkdirs()
-            Log.d(TAG, "Created directory $filesDir: $created")
+        Log.d(TAG, "Initializing WhisperWrapper with model: $modelId at ${modelDir.absolutePath}")
+        
+        // Handle models that might still be in assets (legacy) or in filesDir
+        val filesDir = modelDir.absolutePath
+        
+        // Determine filenames based on model ID
+        val prefix = when {
+            modelId.contains("tiny") -> "tiny"
+            modelId.contains("base") -> "base"
+            modelId.contains("small") -> "small"
+            else -> "tiny"
         }
 
-        try {
-            copyAsset(context, "$assetsDir/tiny-encoder.int8.onnx", "$filesDir/tiny-encoder.int8.onnx")
-            copyAsset(context, "$assetsDir/tiny-decoder.int8.onnx", "$filesDir/tiny-decoder.int8.onnx")
-            copyAsset(context, "$assetsDir/tiny-tokens.txt", "$filesDir/tiny-tokens.txt")
-        } catch (e: Exception) {
-            Log.e(TAG, "[FATAL_ERROR] Failed to copy assets: ${e.message}", e)
-            throw e
-        }
+        val encoderPath = File(modelDir, "$prefix-encoder.int8.onnx").absolutePath
+        val decoderPath = File(modelDir, "$prefix-decoder.int8.onnx").absolutePath
+        val tokensPath = File(modelDir, "$prefix-tokens.txt").absolutePath
 
         Log.d(TAG, "Checking model files in $filesDir...")
-        listOf("tiny-encoder.int8.onnx", "tiny-decoder.int8.onnx", "tiny-tokens.txt").forEach {
-            val file = File(filesDir, it)
+        listOf("$prefix-encoder.int8.onnx", "$prefix-decoder.int8.onnx", "$prefix-tokens.txt").forEach {
+            val file = File(modelDir, it)
             if (!file.exists()) {
                 Log.e(TAG, "CRITICAL: Model file ${file.absolutePath} is missing!")
             } else {
@@ -50,14 +48,14 @@ class WhisperWrapper(context: Context) {
                 featureDim = 80
             ),
             modelConfig = OfflineModelConfig(
-                tokens = "$filesDir/tiny-tokens.txt",
+                tokens = tokensPath,
                 modelType = "whisper",
                 numThreads = 4,
                 debug = false
             ).apply {
                 whisper = OfflineWhisperModelConfig(
-                    encoder = "$filesDir/tiny-encoder.int8.onnx",
-                    decoder = "$filesDir/tiny-decoder.int8.onnx",
+                    encoder = encoderPath,
+                    decoder = decoderPath,
                     language = "zh",
                     task = "transcribe"
                 )

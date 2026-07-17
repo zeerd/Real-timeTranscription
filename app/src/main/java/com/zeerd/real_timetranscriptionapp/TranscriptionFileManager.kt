@@ -101,5 +101,18 @@ class TranscriptionFileManager(private val context: Context) {
         return selectedFileName ?: "Internal Storage (autosave_transcription.txt)"
     }
     
+    suspend fun getHistory(): List<String> = withContext(Dispatchers.IO) {
+        if (!defaultFile.exists()) return@withContext emptyList()
+        try {
+            defaultFile.readLines()
+                .filter { it.isNotBlank() }
+                .takeLast(50) // Load last 50 entries to avoid overwhelming the UI
+                .reversed()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to read history: ${e.message}")
+            emptyList()
+        }
+    }
+
     fun getDefaultFilePath(): String = defaultFile.absolutePath
 }

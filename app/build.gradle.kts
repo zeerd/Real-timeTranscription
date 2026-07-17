@@ -1,3 +1,6 @@
+import java.io.File
+import java.net.URI
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -14,7 +17,7 @@ android {
     defaultConfig {
         applicationId = "com.zeerd.real_timetranscriptionapp"
         minSdk = 26
-        targetSdk = 36
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0"
 
@@ -48,6 +51,7 @@ android {
 dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
+    implementation(libs.commons.compress)
     implementation(libs.onnx.android)
     implementation(libs.onnx.ext)
     implementation(libs.sherpa.onnx)
@@ -67,4 +71,36 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
+}
+
+// 1. 注册一个自定义的下载任务
+val downloadAssets = tasks.register("downloadAssets") {
+    val outputDir = file("src/main/assets/")
+    val targetFile = File(outputDir, "silero_vad.onnx")
+
+    outputs.file(targetFile)
+
+    doLast {
+        if (!targetFile.exists()) {
+            outputDir.mkdirs()
+            println("====== 正在下载固定资产文件... ======")
+            try {
+                URI("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx").toURL().openStream().use { input ->
+                    targetFile.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                println("====== 下载完成！ ======")
+            } catch (e: Exception) {
+                throw GradleException("资产下载失败，请检查网络连接: ${e.message}")
+            }
+        } else {
+            println("====== 资产文件已存在，跳过下载 ======")
+        }
+    }
+}
+
+// 2. 挂载到 Android 编译生命周期，在预编译阶段执行
+tasks.named("preBuild") {
+    dependsOn(downloadAssets)
 }

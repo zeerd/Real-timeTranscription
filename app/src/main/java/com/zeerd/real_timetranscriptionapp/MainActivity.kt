@@ -31,6 +31,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.zeerd.real_timetranscriptionapp.ui.theme.RealtimeTranscriptionAppTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -47,6 +48,9 @@ class MainActivity : ComponentActivity() {
     private val transcriptionChannel = Channel<FloatArray>(Channel.CONFLATED)
     
     private var whisperWrapper: WhisperWrapper? = null
+    private var vadWrapper: SileroVadWrapper? = null // 系统性修复：显式持有 VAD 引用以便释放
+    private var currentModelId: String? = null
+    private var pipelineJob: Job? = null
     private lateinit var fileManager: TranscriptionFileManager
     private lateinit var modelManager: ModelManager
 
@@ -123,9 +127,7 @@ class MainActivity : ComponentActivity() {
                             modelManager = modelManager,
                             onBack = { 
                                 navController.popBackStack()
-                                // Restart pipeline if model changed?
-                                // For now, we require a manual restart or handle it in startAudioPipeline
-                                startAudioPipeline()
+                                // 移除这里的 startAudioPipeline()，由下方的 collect 统一处理
                             }
                         )
                     }
@@ -133,16 +135,35 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        if (ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.RECORD_AUDIO
-            ) == PackageManager.PERMISSION_GRANTED
-        ) {
-            Log.d(TAG, "RECORD_AUDIO already granted")
-            startAudioPipeline()
-        } else {
-            Log.d(TAG, "Requesting RECORD_AUDIO permission")
-            requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        loadHistory()
+
+        // 统一的状态观察器：这是启动/重启录音管道的唯一入口
+        lifecycleScope.launch {
+            // 组合监听：选择的模型变化 OR 模型状态变化
+            modelManager.modelStatuses.collect { statuses ->
+                val selectedId = modelManager.getSelectedModelId()
+                val isReady = modelManager.isModelReady(selectedId)
+                
+                Log.d(TAG, "Sync check: selected=$selectedId, ready=$isReady, currentRunning=$currentModelId")
+
+                if (isReady && currentModelId != selectedId) {
+                    if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                        startAudioPipeline()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun loadHistory() {
+        lifecycleScope.launch {
+            val history = fileManager.getHistory()
+            if (history.isNotEmpty()) {
+                withContext(Dispatchers.Main) {
+                    transcriptions.clear()
+                    transcriptions.addAll(history)
+                }
+            }
         }
     }
 
@@ -150,58 +171,48 @@ class MainActivity : ComponentActivity() {
         val modelId = modelManager.getSelectedModelId()
         val modelDir = modelManager.getModelDir(modelId)
         
-        Log.d(TAG, "Starting audio pipeline with model: $modelId")
+        Log.d(TAG, "Attempting to start audio pipeline with model: $modelId")
         
-        lifecycleScope.launch {
-            // Close previous wrapper if any
+        pipelineJob?.cancel()
+        pipelineJob = lifecycleScope.launch {
+            // 系统性修复：严格管理 Native 资源释放
             whisperWrapper?.close()
             whisperWrapper = null
+            vadWrapper?.close()
+            vadWrapper = null
+            currentModelId = null
             
-            // Move heavy initialization to IO dispatcher to avoid freezing the Main Thread
             val initialized = withContext(Dispatchers.IO) {
                 try {
-                    Log.d(TAG, "Initializing VAD on background thread...")
-                    val vad = SileroVadWrapper(this@MainActivity)
-                    
-                    Log.d(TAG, "Initializing Whisper on background thread ($modelId)...")
-                    
-                    // Check if model exists in assets first (tiny) or in files
-                    val finalModelDir = if (!modelDir.exists()) {
-                        if (modelId == "whisper-tiny") {
-                            // Fallback to legacy assets/whisper-tiny check (only for first run with tiny)
-                            val legacyDir = File(filesDir, "whisper-tiny")
-                            if (legacyDir.exists() && File(legacyDir, "tiny-encoder.int8.onnx").exists()) {
-                                legacyDir
-                            } else {
-                                throw Exception("Model not downloaded. Go to Settings to download $modelId.")
-                            }
-                        } else {
-                            throw Exception("Model not downloaded. Go to Settings to download $modelId.")
-                        }
-                    } else {
-                        modelDir
+                    if (!modelManager.isModelReady(modelId)) {
+                        Log.w(TAG, "Model $modelId not ready, skipping pipeline start")
+                        return@withContext null
                     }
+
+                    Log.d(TAG, "Initializing Native components...")
+                    val vad = SileroVadWrapper(this@MainActivity)
+                    val whisper = WhisperWrapper(this@MainActivity, modelId, modelDir)
                     
-                    val whisper = WhisperWrapper(this@MainActivity, modelId, finalModelDir)
-                    
+                    // 赋值给成员变量以便管理
+                    vadWrapper = vad
                     whisperWrapper = whisper
+                    currentModelId = modelId
+                    
                     vad to whisper
                 } catch (t: Throwable) {
                     val msg = "Initialization failed: ${t.message}"
                     Log.e(TAG, "[FATAL_ERROR] $msg", t)
-                    withContext(Dispatchers.Main) {
-                        transcriptions.add(0, msg)
-                    }
+                    withContext(Dispatchers.Main) { transcriptions.add(0, msg) }
                     null
                 }
             }
 
             if (initialized != null) {
-                val (vadWrapper, whisper) = initialized
-                Log.d(TAG, "Components initialized, starting processing...")
+                val (vad, whisper) = initialized
+                Log.i(TAG, "Pipeline started successfully with $modelId")
 
                 val recorder = AudioRecorder(audioChannel)
-                val pipeline = TranscriptionPipeline(audioChannel, vadWrapper, transcriptionChannel)
+                val pipeline = TranscriptionPipeline(audioChannel, vad, transcriptionChannel)
 
                 launch {
                     pipeline.vadState.collect { state ->

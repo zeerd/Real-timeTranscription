@@ -9,6 +9,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material3.*
@@ -34,14 +36,38 @@ fun SettingsScreen(
 
     var showImportDialog by remember { mutableStateOf(false) }
     var targetModelIdForImport by remember { mutableStateOf("") }
+    
+    // Delete Confirmation Dialog
+    var modelToDelete by remember { mutableStateOf<ModelInfo?>(null) }
 
-    val folderPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocumentTree()
+    if (modelToDelete != null) {
+        AlertDialog(
+            onDismissRequest = { modelToDelete = null },
+            title = { Text("Delete Model?") },
+            text = { Text("This will remove the downloaded files for ${modelToDelete?.name}. You will need to download it again to use it.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        modelToDelete?.let { modelManager.deleteModel(it.id) }
+                        modelToDelete = null
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = Color.Red)
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { modelToDelete = null }) { Text("Cancel") }
+            }
+        )
+    }
+
+    val archivePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null && targetModelIdForImport.isNotEmpty()) {
             scope.launch {
                 try {
-                    modelManager.importFromUri(targetModelIdForImport, uri)
+                    Toast.makeText(context, "Importing... Check progress icons below.", Toast.LENGTH_SHORT).show()
+                    modelManager.importFromArchive(targetModelIdForImport, uri)
                     Toast.makeText(context, "Import successful!", Toast.LENGTH_SHORT).show()
                 } catch (e: Exception) {
                     Toast.makeText(context, "Import failed: ${e.message}", Toast.LENGTH_LONG).show()
@@ -53,8 +79,8 @@ fun SettingsScreen(
     if (showImportDialog) {
         AlertDialog(
             onDismissRequest = { showImportDialog = false },
-            title = { Text("Select Target Model") },
-            text = { Text("Which model are you importing to?") },
+            title = { Text("Select Target Specification") },
+            text = { Text("Which model specification does this archive match?") },
             confirmButton = {
                 Column {
                     modelManager.availableModels.filter { it.id.startsWith("whisper") }.forEach { model ->
@@ -62,7 +88,7 @@ fun SettingsScreen(
                             onClick = {
                                 targetModelIdForImport = model.id
                                 showImportDialog = false
-                                folderPickerLauncher.launch(null)
+                                archivePickerLauncher.launch(arrayOf("application/x-bzip2", "application/octet-stream", "*/*"))
                             },
                             modifier = Modifier.fillMaxWidth()
                         ) {
@@ -115,7 +141,9 @@ fun SettingsScreen(
                     status = status,
                     isSelected = false,
                     onSelect = {},
-                    onDownload = { modelManager.downloadModel(model) }
+                    onDownload = { modelManager.downloadModel(model) },
+                    onDelete = { modelToDelete = it },
+                    isVad = true
                 )
             }
 
@@ -139,7 +167,7 @@ fun SettingsScreen(
                 ) {
                     Icon(Icons.Default.FolderOpen, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Import Model from Storage")
+                    Text("Import Model from Storage (.tar.bz2)")
                 }
             }
 
@@ -159,7 +187,8 @@ fun SettingsScreen(
                     },
                     onDownload = {
                         modelManager.downloadModel(model)
-                    }
+                    },
+                    onDelete = { modelToDelete = it }
                 )
             }
         }
@@ -172,11 +201,13 @@ fun ModelItem(
     status: ModelStatus,
     isSelected: Boolean,
     onSelect: () -> Unit,
-    onDownload: () -> Unit
+    onDownload: () -> Unit,
+    onDelete: (ModelInfo) -> Unit = {},
+    isVad: Boolean = false
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        onClick = onSelect,
+        onClick = if (!isVad) onSelect else ({}),
         colors = CardDefaults.cardColors(
             containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer 
                              else MaterialTheme.colorScheme.surfaceVariant
@@ -198,7 +229,20 @@ fun ModelItem(
 
             when (status) {
                 is ModelStatus.READY -> {
-                    RadioButton(selected = isSelected, onClick = onSelect)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (!isVad) {
+                            IconButton(onClick = { onDelete(model) }) {
+                                Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Gray)
+                            }
+                            RadioButton(selected = isSelected, onClick = onSelect)
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Ready",
+                                tint = Color(0xFF4CAF50)
+                            )
+                        }
+                    }
                 }
                 is ModelStatus.DOWNLOADING -> {
                     Box(contentAlignment = Alignment.Center) {
@@ -212,6 +256,29 @@ fun ModelItem(
                             style = MaterialTheme.typography.labelSmall,
                             fontSize = 8.sp
                         )
+                    }
+                }
+                is ModelStatus.EXTRACTING -> {
+                    Box(contentAlignment = Alignment.Center) {
+                        if (status.progress < 0f) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(32.dp),
+                                strokeWidth = 3.dp,
+                                color = Color.Magenta
+                            )
+                        } else {
+                            CircularProgressIndicator(
+                                progress = { status.progress },
+                                modifier = Modifier.size(32.dp),
+                                strokeWidth = 3.dp,
+                                color = Color.Magenta
+                            )
+                            Text(
+                                text = "${(status.progress * 100).toInt()}%",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontSize = 8.sp
+                            )
+                        }
                     }
                 }
                 is ModelStatus.NOT_DOWNLOADED -> {

@@ -2,7 +2,6 @@ package com.zeerd.real_timetranscriptionapp
 
 import android.app.DownloadManager
 import android.content.Context
-import android.database.Cursor
 import android.net.Uri
 import android.os.Environment
 import android.util.Log
@@ -10,8 +9,15 @@ import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.FilterInputStream
+import java.io.InputStream
+import java.util.Collections
 
 data class ModelInfo(
     val id: String,
@@ -26,6 +32,7 @@ data class ModelInfo(
 sealed class ModelStatus {
     object NOT_DOWNLOADED : ModelStatus()
     data class DOWNLOADING(val progress: Float) : ModelStatus()
+    data class EXTRACTING(val progress: Float) : ModelStatus()
     object READY : ModelStatus()
     object ERROR : ModelStatus()
 }
@@ -35,6 +42,7 @@ class ModelManager(private val context: Context) {
     private val rootDir = File(context.filesDir, "models")
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val activeDownloads = mutableMapOf<String, Long>()
+    private val extractingModels = Collections.synchronizedSet(mutableSetOf<String>())
 
     val availableModels = listOf(
         ModelInfo(
@@ -80,62 +88,74 @@ class ModelManager(private val context: Context) {
 
     init {
         if (!rootDir.exists()) rootDir.mkdirs()
+        // 系统性修复：启动时检查是否有已下载但未解压的 tar.bz2 文件，自动触发解压流程
+        checkPendingDownloads()
         refreshStatuses()
     }
 
+    private fun checkPendingDownloads() {
+        val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        availableModels.forEach { model ->
+            if (model.id == "vad-silero") return@forEach
+            val archive = File(downloadDir, "${model.id}.tar.bz2")
+            if (archive.exists() && !isModelReady(model.id)) {
+                Log.i(TAG, "Found pending archive for ${model.id}, triggering extraction...")
+                scope.launch { extractTarBz2(model.id, archive) }
+            }
+        }
+    }
+
     fun refreshStatuses() {
+        val currentStatuses = _modelStatuses.value
         val statuses = availableModels.associate { model ->
-            val status = if (isModelReady(model.id)) {
+            val ready = isModelReady(model.id)
+            Log.d(TAG, "Checking status for ${model.id}: ready=$ready")
+            val status = if (ready) {
                 ModelStatus.READY
             } else {
-                ModelStatus.NOT_DOWNLOADED
+                // 关键修复：如果当前正在下载或解压，保留该状态，不要跳回 NOT_DOWNLOADED
+                val current = currentStatuses[model.id]
+                if (current is ModelStatus.DOWNLOADING || current is ModelStatus.EXTRACTING) {
+                    current
+                } else {
+                    ModelStatus.NOT_DOWNLOADED
+                }
             }
             model.id to status
         }
         _modelStatuses.value = statuses
     }
 
-    private fun isModelReady(modelId: String): Boolean {
+    fun isModelReady(modelId: String): Boolean {
+        if (extractingModels.contains(modelId)) return false
         if (modelId == "vad-silero") {
-            // Check in assets (legacy) or in files
             val fileInFiles = File(context.filesDir, "silero_vad.onnx")
             if (fileInFiles.exists()) return true
-            
-            return try {
-                context.assets.open("silero_vad.onnx").close()
-                true
-            } catch (e: Exception) {
-                false
-            }
+            return try { context.assets.open("silero_vad.onnx").close(); true } catch (e: Exception) { false }
         }
         val modelDir = File(rootDir, modelId)
-        val prefix = when {
-            modelId.contains("tiny") -> "tiny"
-            modelId.contains("base") -> "base"
-            modelId.contains("small") -> "small"
-            else -> "tiny"
-        }
-        return File(modelDir, "$prefix-encoder.int8.onnx").exists() && 
-               File(modelDir, "$prefix-decoder.int8.onnx").exists() &&
-               File(modelDir, "$prefix-tokens.txt").exists()
+        val prefix = if (modelId.contains("tiny")) "tiny" else if (modelId.contains("base")) "base" else "small"
+        
+        val encoder = File(modelDir, "$prefix-encoder.int8.onnx")
+        val decoder = File(modelDir, "$prefix-decoder.int8.onnx")
+        val tokens = File(modelDir, "$prefix-tokens.txt")
+
+        // 不仅要存在，还要有内容（避免解压失败留下的 0 字节文件）
+        return encoder.exists() && encoder.length() > 1024 * 1024 &&
+               decoder.exists() && decoder.length() > 1024 * 1024 &&
+               tokens.exists() && tokens.length() > 10
     }
     
     fun downloadModel(model: ModelInfo) {
         Log.d(TAG, "Starting download for ${model.name}...")
-        
         val fileName = if (model.id == "vad-silero") "silero_vad.onnx" else "${model.id}.tar.bz2"
-
         val request = DownloadManager.Request(Uri.parse(model.encoderUrl))
             .setTitle("Downloading ${model.name}")
-            .setDescription("Downloading model files")
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
             .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-            .setAllowedOverMetered(true)
-            .setAllowedOverRoaming(true)
-
+        
         val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
         val downloadId = downloadManager.enqueue(request)
-        
         activeDownloads[model.id] = downloadId
         startProgressTracking(model.id, downloadId)
     }
@@ -144,90 +164,234 @@ class ModelManager(private val context: Context) {
         scope.launch {
             val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
             var isDownloading = true
-            
             while (isDownloading) {
                 val query = DownloadManager.Query().setFilterById(downloadId)
-                val cursor: Cursor = downloadManager.query(query)
-                
-                if (cursor.moveToFirst()) {
+                val cursor = downloadManager.query(query)
+                if (cursor != null && cursor.moveToFirst()) {
                     val bytesDownloaded = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
                     val bytesTotal = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
                     val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
-                    val reason = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
-
+                    
                     when (status) {
                         DownloadManager.STATUS_SUCCESSFUL -> {
-                            _modelStatuses.value = _modelStatuses.value + (modelId to ModelStatus.READY)
                             isDownloading = false
                             activeDownloads.remove(modelId)
+                            handleDownloadComplete(modelId)
                         }
                         DownloadManager.STATUS_FAILED -> {
-                            _modelStatuses.value = _modelStatuses.value + (modelId to ModelStatus.ERROR)
+                            Log.e(TAG, "Download failed for $modelId")
+                            _modelStatuses.update { it + (modelId to ModelStatus.ERROR) }
                             isDownloading = false
-                            activeDownloads.remove(modelId)
                         }
                         else -> {
                             val progress = if (bytesTotal > 0) bytesDownloaded.toFloat() / bytesTotal else 0f
-                            _modelStatuses.value = _modelStatuses.value + (modelId to ModelStatus.DOWNLOADING(progress))
+                            _modelStatuses.update { it + (modelId to ModelStatus.DOWNLOADING(progress)) }
                         }
                     }
+                    cursor.close()
                 }
-                cursor.close()
                 delay(1000)
             }
         }
     }
 
-    fun getModelDir(modelId: String): File {
-        return File(rootDir, modelId)
-    }
-    
-    fun getSelectedModelId(): String {
-        return context.getSharedPreferences("settings", Context.MODE_PRIVATE)
-            .getString("selected_model", "whisper-tiny") ?: "whisper-tiny"
-    }
-    
-    fun setSelectedModelId(modelId: String) {
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE)
-            .edit()
-            .putString("selected_model", modelId)
-            .apply()
-    }
-
-    suspend fun importFromUri(modelId: String, uri: Uri) = withContext(Dispatchers.IO) {
-        val documentFile = DocumentFile.fromTreeUri(context, uri) ?: return@withContext
-        val modelDir = File(rootDir, modelId)
-        if (!modelDir.exists()) modelDir.mkdirs()
-
-        val prefix = when {
-            modelId.contains("tiny") -> "tiny"
-            modelId.contains("base") -> "base"
-            modelId.contains("small") -> "small"
-            else -> "tiny"
-        }
-
-        val files = documentFile.listFiles()
-        val encoder = files.find { it.name?.contains("encoder") == true && it.name?.contains("onnx") == true }
-        val decoder = files.find { it.name?.contains("decoder") == true && it.name?.contains("onnx") == true }
-        val tokens = files.find { it.name?.contains("tokens") == true || it.name?.contains("vocab") == true }
-
-        if (encoder != null && decoder != null && tokens != null) {
-            copyDocumentToFile(encoder, File(modelDir, "$prefix-encoder.int8.onnx"))
-            copyDocumentToFile(decoder, File(modelDir, "$prefix-decoder.int8.onnx"))
-            copyDocumentToFile(tokens, File(modelDir, "$prefix-tokens.txt"))
-            
-            Log.d(TAG, "Imported $modelId successfully from $uri")
-            withContext(Dispatchers.Main) { refreshStatuses() }
+    private suspend fun handleDownloadComplete(modelId: String) {
+        val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        if (modelId == "vad-silero") {
+            val src = File(downloadDir, "silero_vad.onnx")
+            val dest = File(context.filesDir, "silero_vad.onnx")
+            withContext(Dispatchers.IO) {
+                if (src.exists()) {
+                    src.copyTo(dest, overwrite = true)
+                    src.delete()
+                    Log.d(TAG, "VAD model copied and source deleted.")
+                }
+            }
+            refreshStatuses()
         } else {
-            throw Exception("Required files missing in folder (encoder, decoder, tokens)")
-        }
-    }
-
-    private fun copyDocumentToFile(docFile: DocumentFile, destFile: File) {
-        context.contentResolver.openInputStream(docFile.uri)?.use { input ->
-            FileOutputStream(destFile).use { output ->
-                input.copyTo(output)
+            val archive = File(downloadDir, "$modelId.tar.bz2")
+            if (archive.exists()) {
+                extractTarBz2(modelId, archive)
+                // Cleanup archive after extraction if successful
+                if (isModelReady(modelId)) {
+                    withContext(Dispatchers.IO) { archive.delete() }
+                    Log.d(TAG, "Archive deleted: ${archive.name}")
+                }
+            } else {
+                Log.e(TAG, "Downloaded archive not found at ${archive.absolutePath}")
+                _modelStatuses.update { it + (modelId to ModelStatus.ERROR) }
             }
         }
     }
+
+    suspend fun importFromArchive(modelId: String, uri: Uri) = withContext(Dispatchers.IO) {
+        val tempFile = File(context.cacheDir, "import_temp_${System.currentTimeMillis()}.tar.bz2")
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(tempFile).use { output -> input.copyTo(output) }
+            }
+            extractTarBz2(modelId, tempFile)
+        } catch (e: Exception) {
+            Log.e(TAG, "Import failed", e)
+            withContext(Dispatchers.Main) { _modelStatuses.update { it + (modelId to ModelStatus.ERROR) } }
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    private suspend fun extractTarBz2(modelId: String, archive: File) {
+        Log.d(TAG, "Extracting archive ${archive.name} (optimized pass)...")
+        extractingModels.add(modelId)
+        _modelStatuses.update { it + (modelId to ModelStatus.EXTRACTING(-1f)) }
+        
+        val modelDir = File(rootDir, modelId)
+        val tempDir = File(rootDir, "${modelId}_tmp")
+        if (tempDir.exists()) tempDir.deleteRecursively()
+        tempDir.mkdirs()
+        val prefix = if (modelId.contains("tiny")) "tiny" else if (modelId.contains("base")) "base" else "small"
+        val totalCompressedSize = archive.length()
+
+        try {
+            withContext(Dispatchers.IO) {
+                val extractedCategories = mutableSetOf<String>()
+                var extractedCount = 0
+                var lastUpdatePercent = -1
+
+                FileInputStream(archive).use { fis ->
+                    var bytesReadTotal = 0L
+                    val countingIn = object : FilterInputStream(fis) {
+                        private fun updateProgress(n: Int) {
+                            if (n <= 0) return
+                            bytesReadTotal += n
+                            if (totalCompressedSize > 0) {
+                                val currentPercent = (bytesReadTotal * 100 / totalCompressedSize).toInt()
+                                if (currentPercent > lastUpdatePercent) {
+                                    lastUpdatePercent = currentPercent
+                                    Log.d(TAG, "Extraction progress: $currentPercent% ($bytesReadTotal / $totalCompressedSize bytes)")
+                                    _modelStatuses.update { it + (modelId to ModelStatus.EXTRACTING(currentPercent / 100f)) }
+                                }
+                            }
+                        }
+
+                        override fun read(): Int {
+                            val result = super.read()
+                            if (result != -1) updateProgress(1)
+                            return result
+                        }
+
+                        override fun read(b: ByteArray, off: Int, len: Int): Int {
+                            val result = super.read(b, off, len)
+                            if (result != -1) updateProgress(result)
+                            return result
+                        }
+                    }
+
+                    BZip2CompressorInputStream(countingIn).use { bzIn ->
+                        TarArchiveInputStream(bzIn).use { tarIn ->
+                            var entry = tarIn.nextEntry
+                            while (entry != null) {
+                                if (!entry.isDirectory) {
+                                    val name = entry.name
+                                    val isEncoder = name.contains("encoder") && name.contains("int8") && name.endsWith(".onnx")
+                                    val isDecoder = name.contains("decoder") && name.contains("int8") && name.endsWith(".onnx")
+                                    val isTokens = name.contains("tokens.txt")
+
+                                    val destName: String? = when {
+                                        isEncoder && "encoder" !in extractedCategories -> "$prefix-encoder.int8.onnx"
+                                        isDecoder && "decoder" !in extractedCategories -> "$prefix-decoder.int8.onnx"
+                                        isTokens && "tokens" !in extractedCategories -> "$prefix-tokens.txt"
+                                        else -> null
+                                    }
+
+                                    if (destName != null) {
+                                        val category = when {
+                                            isEncoder -> "encoder"
+                                            isDecoder -> "decoder"
+                                            else -> "tokens"
+                                        }
+                                        val destFile = File(tempDir, destName)
+                                        val tarSize = entry.size
+                                        var copiedBytes = 0L
+                                        Log.d(TAG, ">>> Extracting: ${entry.name} -> $destName (${tarSize} bytes)")
+                                        
+                                        FileOutputStream(destFile).use { out ->
+                                            val buf = ByteArray(64 * 1024)
+                                            var l: Int
+                                            var lastPct = -1
+                                            while (tarIn.read(buf).also { l = it } != -1) {
+                                                out.write(buf, 0, l)
+                                                copiedBytes += l
+                                                val pct = if (tarSize > 0) (copiedBytes * 100 / tarSize).toInt() else 100
+                                                if (pct != lastPct) {
+                                                    Log.d(TAG, "Extracting $destName: $pct% complete")
+                                                    lastPct = pct
+                                                }
+                                            }
+                                        }
+                                        extractedCategories.add(category)
+                                        extractedCount++
+                                        Log.d(TAG, "[SUCCESS] Extracted $destName (${destFile.length()} bytes)")
+                                    }
+                                }
+                                
+                                // 关键优化：如果 3 个文件都拿到了，直接收工，不再扫描后面几百MB的数据
+                                if (extractedCategories.size == 3) {
+                                    Log.i(TAG, "Found all required files. Stopping extraction early.")
+                                    break 
+                                }
+                                entry = tarIn.nextEntry
+                            }
+                        }
+                    }
+                }
+
+                if (extractedCategories.size == 3) {
+                    if (modelDir.exists()) modelDir.deleteRecursively()
+                    if (tempDir.renameTo(modelDir)) {
+                        Log.i(TAG, "Successfully moved $tempDir to $modelDir")
+                    } else {
+                        Log.e(TAG, "Failed to rename $tempDir to $modelDir, trying copy.")
+                        tempDir.copyRecursively(modelDir, overwrite = true)
+                    }
+                } else {
+                    Log.w(TAG, "Only extracted ${extractedCategories.size}/3 files. Missing: ${setOf("encoder", "decoder", "tokens") - extractedCategories}")
+                }
+                Log.i(TAG, "[SUCCESS] Installation of $modelId finished.")
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "[FATAL_ERROR] Extraction failed for $modelId", e)
+            _modelStatuses.update { it + (modelId to ModelStatus.ERROR) }
+        } finally {
+            if (tempDir.exists()) tempDir.deleteRecursively()
+            // 1. 先从集合中移除，这样接下来的 isModelReady 就能返回 true
+            extractingModels.remove(modelId)
+            
+            // 2. 在 IO 线程直接计算最终状态并更新 Flow，确保 UI 第一时间收到
+            val isReady = isModelReady(modelId)
+            val finalStatus = if (isReady) ModelStatus.READY else ModelStatus.NOT_DOWNLOADED
+            
+            _modelStatuses.update { it + (modelId to finalStatus) }
+            
+            Log.d(TAG, "Extraction cleanup done for $modelId. isReady=$isReady")
+            
+            // 3. 切换回主线程做一次全局刷新，作为最终保障
+            withContext(Dispatchers.Main) {
+                refreshStatuses()
+            }
+        }
+    }
+
+    fun getModelDir(modelId: String): File = File(rootDir, modelId)
+    
+    fun deleteModel(modelId: String) {
+        val modelDir = File(rootDir, modelId)
+        if (modelDir.exists()) {
+            modelDir.deleteRecursively()
+            Log.i(TAG, "Model $modelId deleted.")
+            refreshStatuses()
+        }
+    }
+    fun getSelectedModelId(): String = context.getSharedPreferences("settings", Context.MODE_PRIVATE).getString("selected_model", "whisper-tiny") ?: "whisper-tiny"
+    fun setSelectedModelId(modelId: String) = context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putString("selected_model", modelId).apply()
 }

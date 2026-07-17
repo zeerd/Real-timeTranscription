@@ -11,9 +11,11 @@ composeBom = "2026.02.01"
 onnxruntime = "1.27.0"
 onnxext = "0.13.0"
 sherpa = "v1.13.4"
+commons-compress = "1.26.1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+commons-compress = { group = "org.apache.commons", name = "commons-compress", version.ref = "commons-compress" }
 onnx-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxruntime" }
 onnx-ext = { group = "com.microsoft.onnxruntime", name = "onnxruntime-extensions-android", version.ref = "onnxext" }
 sherpa-onnx = { group = "com.github.k2-fsa", name = "sherpa-onnx", version.ref = "sherpa" }

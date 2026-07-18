@@ -1,10 +1,8 @@
 package com.zeerd.real_timetranscriptionapp
 
-import android.app.DownloadManager
 import android.content.Context
 import android.media.MediaRecorder
 import android.net.Uri
-import android.os.Environment
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.*
@@ -21,6 +19,8 @@ import java.io.InputStream
 import java.util.Collections
 import java.util.Locale
 
+enum class ModelCategory { ASR, SPEAKER, LLM, VAD }
+
 data class ModelInfo(
     val id: String,
     val name: String,
@@ -28,7 +28,8 @@ data class ModelInfo(
     val encoderUrl: String,
     val decoderUrl: String,
     val tokensUrl: String,
-    val sizeLabel: String
+    val sizeLabel: String,
+    val category: ModelCategory = ModelCategory.ASR
 )
 
 sealed class ModelStatus {
@@ -43,21 +44,11 @@ class ModelManager(private val context: Context) {
     private val TAG = "ModelManager"
     private val rootDir = File(context.filesDir, "models")
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private val activeDownloads = mutableMapOf<String, Long>()
     private val extractingModels = Collections.synchronizedSet(mutableSetOf<String>())
 
     private val _customModels = MutableStateFlow<List<ModelInfo>>(emptyList())
 
     private val staticModels = listOf(
-        ModelInfo(
-            id = "vad-silero",
-            name = "Silero VAD",
-            description = "Voice Activity Detection model. Required for all transcription.",
-            encoderUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
-            decoderUrl = "",
-            tokensUrl = "",
-            sizeLabel = "~600KB"
-        ),
         ModelInfo(
             id = "whisper-tiny",
             name = "Whisper Tiny (Multi)",
@@ -65,7 +56,8 @@ class ModelManager(private val context: Context) {
             encoderUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-tiny.tar.bz2",
             decoderUrl = "", // We handle tar.bz2 for these
             tokensUrl = "",
-            sizeLabel = "~150MB"
+            sizeLabel = "~150MB",
+            category = ModelCategory.ASR
         ),
         ModelInfo(
             id = "whisper-base",
@@ -74,7 +66,8 @@ class ModelManager(private val context: Context) {
             encoderUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-base.tar.bz2",
             decoderUrl = "",
             tokensUrl = "",
-            sizeLabel = "~290MB"
+            sizeLabel = "~290MB",
+            category = ModelCategory.ASR
         ),
         ModelInfo(
             id = "whisper-small",
@@ -83,7 +76,18 @@ class ModelManager(private val context: Context) {
             encoderUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-small.tar.bz2",
             decoderUrl = "",
             tokensUrl = "",
-            sizeLabel = "~960MB"
+            sizeLabel = "~960MB",
+            category = ModelCategory.ASR
+        ),
+        ModelInfo(
+            id = "SenseVoiceSmall",
+            name = "SenseVoice Small (Multi)",
+            description = "High accuracy. Requires more memory and processing power.",
+            encoderUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
+            decoderUrl = "",
+            tokensUrl = "",
+            sizeLabel = "~960MB",
+            category = ModelCategory.ASR
         ),
         ModelInfo(
             id = "speaker-ecapa",
@@ -92,7 +96,8 @@ class ModelManager(private val context: Context) {
             encoderUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
             decoderUrl = "",
             tokensUrl = "",
-            sizeLabel = "~20MB"
+            sizeLabel = "~20MB",
+            category = ModelCategory.SPEAKER
         ),
         ModelInfo(
             id = "llm-gemma-2b",
@@ -101,12 +106,18 @@ class ModelManager(private val context: Context) {
             encoderUrl = "https://huggingface.co/google/gemma-2b-it-tflite/resolve/main/gemma-2b-it-cpu-int8.tflite", // Example URL
             decoderUrl = "",
             tokensUrl = "",
-            sizeLabel = "~1.4GB"
+            sizeLabel = "~1.4GB",
+            category = ModelCategory.LLM
         )
     )
 
     val availableModels: List<ModelInfo>
         get() = staticModels + _customModels.value
+
+    // 默认可选模型的下载链接列表（供设置页以“可点击链接”形式展示，不再提供下载按钮）。
+    // 用户可手动下载后通过导入安装，也可下载其他 sherpa-onnx 支持的模型。
+    val defaultDownloadLinks: List<ModelInfo>
+        get() = staticModels
 
     // 添加一个 Flow 以便 UI 观察模型列表的变化
     val customModels = _customModels.asStateFlow()
@@ -120,31 +131,67 @@ class ModelManager(private val context: Context) {
     init {
         if (!rootDir.exists()) rootDir.mkdirs()
         discoverCustomModels()
-        // 系统性修复：启动时检查是否有已下载但未解压的 tar.bz2 文件，自动触发解压流程
-        checkPendingDownloads()
         refreshStatuses()
     }
 
     private fun discoverCustomModels() {
-        val custom = rootDir.listFiles()?.filter { it.isDirectory && it.name.startsWith("custom-") }?.map { dir ->
-            val isLlm = dir.listFiles()?.any { it.name.endsWith(".tflite") || it.name.endsWith(".bin") || it.name.endsWith(".litertlm") } ?: false
-            val isSpeaker = dir.name.startsWith("custom-speaker-")
+        // 保留已登记（导入时立即创建）的自定义模型名称/描述，仅刷新体积标签
+        val existing = _customModels.value.associateBy { it.id }
+        // 扫描所有模型目录（包括历史遗留的 whisper-small 等），按内容归类，避免“死占位行”
+        // 也避免已安装模型因 id 前缀不匹配而从列表消失。
+        val custom = rootDir.listFiles()?.filter { it.isDirectory }?.mapNotNull { dir ->
+            val files = dir.listFiles() ?: return@mapNotNull null
+            val hasLlm = files.any { it.name.endsWith(".tflite") || it.name.endsWith(".bin") || it.name.endsWith(".litertlm") }
+            val hasOnnx = files.any { it.name.endsWith(".onnx") }
+            val hasTokens = files.any { it.name == "tokens.txt" }
+            val category = when {
+                hasLlm -> ModelCategory.LLM
+                hasOnnx && !hasTokens -> ModelCategory.SPEAKER
+                hasOnnx -> ModelCategory.ASR
+                else -> return@mapNotNull null
+            }
+            val prev = existing[dir.name]
             ModelInfo(
                 id = dir.name,
-                name = dir.name.removePrefix("custom-").replace("-", " ").replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.ROOT) else it.toString() },
-                description = when {
-                    isLlm -> "Custom LLM model imported by user."
-                    isSpeaker -> "Custom speaker diarization model imported by user."
-                    else -> "Custom ASR model imported by user."
+                name = prev?.name ?: dir.name.removePrefix("custom-").replace("-", " ").replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.ROOT) else it.toString() },
+                description = prev?.description ?: when (category) {
+                    ModelCategory.LLM -> "Custom LLM model imported by user."
+                    ModelCategory.SPEAKER -> "Custom speaker diarization model imported by user."
+                    ModelCategory.ASR -> "Custom ASR model imported by user."
+                    ModelCategory.VAD -> "Custom VAD model imported by user."
                 },
                 encoderUrl = "",
                 decoderUrl = "",
                 tokensUrl = "",
-                sizeLabel = formatSize(computeDirectorySize(dir))
+                sizeLabel = formatSize(computeDirectorySize(dir)),
+                category = category
             )
         } ?: emptyList()
         _customModels.value = custom
         Log.i(TAG, "[DISCOVER] custom models found: ${custom.map { it.id }}")
+    }
+
+    // 导入开始时立即登记一个自定义模型信息块，使 UI 能即时显示进度（EXTRACTING），
+    // 避免“进度信息块缺失”的问题。
+    private fun registerCustomModel(info: ModelInfo) {
+        val current = _customModels.value.toMutableList()
+        if (current.none { it.id == info.id }) {
+            current.add(info)
+            _customModels.value = current
+            Log.i(TAG, "[REGISTER] custom model block created: ${info.id}")
+        }
+    }
+
+    // 从导入的 uri 读取原始文件名，用于给自定义模型起更友好的名字
+    private fun getDisplayName(uri: Uri): String? {
+        return try {
+            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (idx != -1) cursor.getString(idx) else null
+                } else null
+            }
+        } catch (e: Exception) { null }
     }
 
     // 递归计算目录（含子目录）中所有文件的总字节数
@@ -168,38 +215,12 @@ class ModelManager(private val context: Context) {
         }
     }
 
-    private fun checkPendingDownloads() {
-        val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        availableModels.forEach { model ->
-            if (model.id == "vad-silero") return@forEach
-            if (model.id.startsWith("llm")) {
-                val modelFile = File(downloadDir, "${model.id}.tflite")
-                if (modelFile.exists() && !isModelReady(model.id)) {
-                    Log.i(TAG, "Found pending LLM model for ${model.id}, triggering move...")
-                    scope.launch { handleDownloadComplete(model.id) }
-                }
-                return@forEach
-            }
-            if (isSingleFileModel(model)) {
-                val fileName = model.encoderUrl.substringAfterLast("/")
-                val file = File(downloadDir, fileName)
-                if (file.exists() && !isModelReady(model.id)) {
-                    Log.i(TAG, "Found pending single-file model for ${model.id}, triggering copy...")
-                    scope.launch { handleDownloadComplete(model.id) }
-                }
-                return@forEach
-            }
-            val archive = File(downloadDir, "${model.id}.tar.bz2")
-            if (archive.exists() && !isModelReady(model.id)) {
-                Log.i(TAG, "Found pending archive for ${model.id}, triggering extraction...")
-                scope.launch { extractTarBz2(model.id, archive) }
-            }
-        }
-    }
-
     fun refreshStatuses() {
         val currentStatuses = _modelStatuses.value
-        val statuses = availableModels.associate { model ->
+        // 只检查磁盘上真实存在的模型（_customModels）。staticModels 里的 whisper-tiny /
+        // SenseVoiceSmall 等只是下载链接占位，永远不会被应用内安装，检查它们只会产生
+        // 无意义的 "not ready" 日志，故跳过。
+        val statuses = _customModels.value.associate { model ->
             val ready = isModelReady(model.id)
             Log.d(TAG, "Checking status for ${model.id}: ready=$ready")
             val status = if (ready) {
@@ -227,158 +248,41 @@ class ModelManager(private val context: Context) {
         }
         
         val modelDir = File(rootDir, modelId)
-        
+
         // 特殊处理 LLM 模型：支持 .bin, .litertlm 或 .tflite
         if (modelId.contains("llm")) {
-            val modelFile = modelDir.listFiles()?.find { 
+            val modelFile = modelDir.listFiles()?.find {
                 it.name.endsWith(".bin") || it.name.endsWith(".litertlm") || it.name.endsWith(".tflite")
             }
             return modelFile != null && modelFile.length() > 10 * 1024 * 1024 // 至少 10MB，自定义模型可能较小
         }
 
-        // 特殊处理单文件模型（如说话人 ECAPA .onnx）：检查目录内是否存在 .onnx 文件
-        // 注意排除 whisper 模型（其目录也含 .onnx，但需走下面的 encoder/decoder/tokens 校验）
-        val isWhisper = setOf("tiny", "base", "small").any { modelId.contains(it) }
-        if (!isWhisper && (modelId == "speaker-ecapa" || modelDir.listFiles()?.any { it.name.endsWith(".onnx") } == true)) {
-            val onnxFile = modelDir.listFiles()?.find { it.name.endsWith(".onnx") }
-            val ready = onnxFile != null && onnxFile.length() > 1024 * 1024 // 至少 1MB
-            Log.d(TAG, "[isModelReady] Speaker/onnx model '$modelId': onnxFile=${onnxFile?.absolutePath}, size=${onnxFile?.length()}, ready=$ready")
+        // 内容驱动：完全按目录里的文件判定，不依赖 modelId 里的 tiny/base/small/sense 等字样。
+        // sherpa-onnx 的 Whisper/SenseVoice 配置只接收 onnx 文件路径，模型尺寸（tiny/base/small）
+        // 已固化在 onnx 图里，文件名前缀对推理没有任何意义，因此这里不做任何按尺寸的特殊处理。
+        val files = modelDir.listFiles() ?: emptyArray()
+        val onnxFiles = files.filter { it.name.endsWith(".onnx", ignoreCase = true) }
+        val tokensFile = File(modelDir, "tokens.txt")
+
+        // 1) ASR 模型（Whisper / SenseVoice / 任意新类型）：至少一个 onnx(>1MB) + tokens.txt(>10B)
+        if (tokensFile.exists() && tokensFile.length() > 10 && onnxFiles.any { it.length() > 1024 * 1024 }) {
+            val ready = true
+            Log.d(TAG, "[isModelReady] ASR model '$modelId': onnx=${onnxFiles.firstOrNull()?.absolutePath}, tokens=${tokensFile.exists()}, ready=$ready")
             return ready
         }
 
-        val prefix = if (modelId.contains("tiny")) "tiny" else if (modelId.contains("base")) "base" else "small"
-        
-        val encoder = File(modelDir, "$prefix-encoder.int8.onnx")
-        val decoder = File(modelDir, "$prefix-decoder.int8.onnx")
-        val tokens = File(modelDir, "$prefix-tokens.txt")
+        // 2) 单文件模型（如说话人 ECAPA .onnx）：目录内存在 onnx(>1MB)，无需 tokens.txt
+        val singleOnnx = onnxFiles.firstOrNull { it.length() > 1024 * 1024 }
+        if (singleOnnx != null) {
+            val ready = true
+            Log.d(TAG, "[isModelReady] Single-file model '$modelId': onnxFile=${singleOnnx.absolutePath}, size=${singleOnnx.length()}, ready=$ready")
+            return ready
+        }
 
-        // 不仅要存在，还要有内容（避免解压失败留下的 0 字节文件）
-        return encoder.exists() && encoder.length() > 1024 * 1024 &&
-               decoder.exists() && decoder.length() > 1024 * 1024 &&
-               tokens.exists() && tokens.length() > 10
+        Log.d(TAG, "[isModelReady] Model '$modelId' not ready (no valid onnx/tokens combination)")
+        return false
     }
     
-    // 判断模型是否为单文件下载（如说话人模型是单个 .onnx，而非 tar.bz2 压缩包）
-    private fun isSingleFileModel(model: ModelInfo): Boolean {
-        return model.encoderUrl.endsWith(".onnx", ignoreCase = true)
-    }
-
-    // 根据模型信息计算下载目录中的文件名
-    private fun getDownloadFileName(model: ModelInfo): String {
-        return when {
-            model.id == "vad-silero" -> "silero_vad.onnx"
-            model.id.startsWith("llm") -> "${model.id}.tflite"
-            isSingleFileModel(model) -> model.encoderUrl.substringAfterLast("/")
-            else -> "${model.id}.tar.bz2"
-        }
-    }
-
-    fun downloadModel(model: ModelInfo) {
-        Log.d(TAG, "Starting download for ${model.name}...")
-        val fileName = getDownloadFileName(model)
-        val request = DownloadManager.Request(Uri.parse(model.encoderUrl))
-            .setTitle("Downloading ${model.name}")
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
-        
-        val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-        val downloadId = downloadManager.enqueue(request)
-        activeDownloads[model.id] = downloadId
-        startProgressTracking(model.id, downloadId)
-    }
-
-    private fun startProgressTracking(modelId: String, downloadId: Long) {
-        scope.launch {
-            val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-            var isDownloading = true
-            while (isDownloading) {
-                val query = DownloadManager.Query().setFilterById(downloadId)
-                val cursor = downloadManager.query(query)
-                if (cursor != null && cursor.moveToFirst()) {
-                    val bytesDownloaded = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
-                    val bytesTotal = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
-                    val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
-                    
-                    when (status) {
-                        DownloadManager.STATUS_SUCCESSFUL -> {
-                            isDownloading = false
-                            activeDownloads.remove(modelId)
-                            handleDownloadComplete(modelId)
-                        }
-                        DownloadManager.STATUS_FAILED -> {
-                            Log.e(TAG, "Download failed for $modelId")
-                            _modelStatuses.update { it + (modelId to ModelStatus.ERROR) }
-                            isDownloading = false
-                        }
-                        else -> {
-                            val progress = if (bytesTotal > 0) bytesDownloaded.toFloat() / bytesTotal else 0f
-                            _modelStatuses.update { it + (modelId to ModelStatus.DOWNLOADING(progress)) }
-                        }
-                    }
-                    cursor.close()
-                }
-                delay(1000)
-            }
-        }
-    }
-
-    private suspend fun handleDownloadComplete(modelId: String) {
-        val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        if (modelId == "vad-silero") {
-            val src = File(downloadDir, "silero_vad.onnx")
-            val dest = File(context.filesDir, "silero_vad.onnx")
-            withContext(Dispatchers.IO) {
-                if (src.exists()) {
-                    src.copyTo(dest, overwrite = true)
-                    src.delete()
-                    Log.d(TAG, "VAD model copied and source deleted.")
-                }
-            }
-            refreshStatuses()
-        } else if (isSingleFileModel(availableModels.firstOrNull { it.id == modelId } ?: return)) {
-            // 单文件模型（如说话人 .onnx）：直接拷贝到模型目录，保留原始文件名
-            val fileName = getDownloadFileName(availableModels.first { it.id == modelId })
-            val src = File(downloadDir, fileName)
-            val modelDir = getModelDir(modelId)
-            if (!modelDir.exists()) modelDir.mkdirs()
-            val dest = File(modelDir, fileName)
-            withContext(Dispatchers.IO) {
-                if (src.exists()) {
-                    src.copyTo(dest, overwrite = true)
-                    src.delete()
-                    Log.d(TAG, "Single-file model copied to ${dest.absolutePath}")
-                }
-            }
-            refreshStatuses()
-        } else if (modelId.startsWith("llm")) {
-            val src = File(downloadDir, "$modelId.tflite")
-            val modelDir = getModelDir(modelId)
-            if (!modelDir.exists()) modelDir.mkdirs()
-            val dest = File(modelDir, "$modelId.tflite")
-            withContext(Dispatchers.IO) {
-                if (src.exists()) {
-                    src.copyTo(dest, overwrite = true)
-                    src.delete()
-                    Log.d(TAG, "LLM model moved to ${dest.absolutePath}")
-                }
-            }
-            refreshStatuses()
-        } else {
-            val archive = File(downloadDir, "$modelId.tar.bz2")
-            if (archive.exists()) {
-                extractTarBz2(modelId, archive)
-                // Cleanup archive after extraction if successful
-                if (isModelReady(modelId)) {
-                    withContext(Dispatchers.IO) { archive.delete() }
-                    Log.d(TAG, "Archive deleted: ${archive.name}")
-                }
-            } else {
-                Log.e(TAG, "Downloaded archive not found at ${archive.absolutePath}")
-                _modelStatuses.update { it + (modelId to ModelStatus.ERROR) }
-            }
-        }
-    }
-
     suspend fun importFromArchive(modelId: String, uri: Uri) = withContext(Dispatchers.IO) {
         val tempFile = File(context.cacheDir, "import_temp_${System.currentTimeMillis()}.tar.bz2")
         try {
@@ -394,72 +298,106 @@ class ModelManager(private val context: Context) {
         }
     }
 
+    // 内容驱动导入：不要求用户选择模型类型。压缩包里的 .onnx + tokens.txt 原样解压，
+    // 模型类型由 WhisperWrapper 按文件内容自动识别。自动分配 custom-asr-<时间戳> 目录，
+    // 将来新增任何 ASR 模型类型都无需改这里。导入开始即创建信息块并描画进度。
+    suspend fun importAsrArchive(uri: Uri) = withContext(Dispatchers.IO) {
+        val modelId = "custom-asr-${System.currentTimeMillis()}"
+        val displayName = getDisplayName(uri)
+        val name = displayName?.substringBeforeLast(".")?.takeIf { it.isNotBlank() } ?: "Imported ASR Model"
+        val info = ModelInfo(
+            id = modelId,
+            name = name,
+            description = "Custom ASR model imported by user.",
+            encoderUrl = "", decoderUrl = "", tokensUrl = "", sizeLabel = "Importing...",
+            category = ModelCategory.ASR
+        )
+        registerCustomModel(info)
+        _modelStatuses.update { it + (modelId to ModelStatus.EXTRACTING(-1f)) }
+        Log.i(TAG, "[IMPORT_ASR] auto-assigned modelId=$modelId name=$name")
+        importFromArchive(modelId, uri)
+        discoverCustomModels()
+    }
+
     // 导入单文件模型（如说话人 ECAPA .onnx）：生成独立的 custom-speaker-<name> 目录，
-    // 使其作为独立信息块出现在设置页的 Speaker Diarization 分区
+    // 使其作为独立信息块出现在设置页的 Speaker Diarization 分区。导入开始即创建信息块并描画进度。
     suspend fun importSingleFileModel(uri: Uri, originalFileName: String) = withContext(Dispatchers.IO) {
         val baseName = originalFileName.substringBeforeLast(".")
         val modelId = "custom-speaker-${baseName.lowercase().replace(" ", "-")}"
+        val info = ModelInfo(
+            id = modelId,
+            name = baseName,
+            description = "Custom speaker diarization model imported by user.",
+            encoderUrl = "", decoderUrl = "", tokensUrl = "", sizeLabel = "Importing...",
+            category = ModelCategory.SPEAKER
+        )
+        registerCustomModel(info)
+        _modelStatuses.update { it + (modelId to ModelStatus.EXTRACTING(-1f)) }
+
         val modelDir = getModelDir(modelId)
         if (!modelDir.exists()) modelDir.mkdirs()
         val destFile = File(modelDir, originalFileName)
         Log.i(TAG, "[IMPORT_SPEAKER] uri=$uri fileName=$originalFileName -> modelId=$modelId dest=${destFile.absolutePath}")
-
-        _modelStatuses.update { it + (modelId to ModelStatus.EXTRACTING(-1f)) }
 
         try {
             context.contentResolver.openInputStream(uri)?.use { input ->
                 FileOutputStream(destFile).use { output -> input.copyTo(output) }
             }
             Log.i(TAG, "[IMPORT_SPEAKER] Success: ${destFile.absolutePath} (${destFile.length()} bytes)")
-            discoverCustomModels()
         } catch (e: Exception) {
             Log.e(TAG, "[IMPORT_SPEAKER] Failed to import speaker model", e)
             _modelStatuses.update { it + (modelId to ModelStatus.ERROR) }
         } finally {
-            refreshStatuses()
+            discoverCustomModels()
         }
     }
 
     suspend fun importLiteRtModel(uri: Uri, originalFileName: String) = withContext(Dispatchers.IO) {
         val baseName = originalFileName.substringBeforeLast(".")
         val modelId = "custom-llm-${baseName.lowercase().replace(" ", "-")}"
+        val info = ModelInfo(
+            id = modelId,
+            name = baseName,
+            description = "Custom LLM model imported by user.",
+            encoderUrl = "", decoderUrl = "", tokensUrl = "", sizeLabel = "Importing...",
+            category = ModelCategory.LLM
+        )
+        registerCustomModel(info)
+        _modelStatuses.update { it + (modelId to ModelStatus.EXTRACTING(-1f)) }
+
         val modelDir = File(rootDir, modelId)
         if (!modelDir.exists()) modelDir.mkdirs()
-        
+
         val destFile = File(modelDir, originalFileName)
-        
-        _modelStatuses.update { it + (modelId to ModelStatus.EXTRACTING(-1f)) }
-        
+
         try {
             context.contentResolver.openInputStream(uri)?.use { input ->
                 FileOutputStream(destFile).use { output -> input.copyTo(output) }
             }
             Log.d(TAG, "LiteRT model imported successfully to ${destFile.absolutePath}")
-            discoverCustomModels()
         } catch (e: Exception) {
             Log.e(TAG, "LiteRT model Import failed", e)
             _modelStatuses.update { it + (modelId to ModelStatus.ERROR) }
         } finally {
-            refreshStatuses()
+            discoverCustomModels()
         }
     }
 
     private suspend fun extractTarBz2(modelId: String, archive: File) {
-        Log.d(TAG, "Extracting archive ${archive.name} (optimized pass)...")
+        Log.d(TAG, "Extracting archive ${archive.name} (content-driven pass)...")
         extractingModels.add(modelId)
         _modelStatuses.update { it + (modelId to ModelStatus.EXTRACTING(-1f)) }
-        
+
         val modelDir = File(rootDir, modelId)
         val tempDir = File(rootDir, "${modelId}_tmp")
         if (tempDir.exists()) tempDir.deleteRecursively()
         tempDir.mkdirs()
-        val prefix = if (modelId.contains("tiny")) "tiny" else if (modelId.contains("base")) "base" else "small"
         val totalCompressedSize = archive.length()
 
         try {
             withContext(Dispatchers.IO) {
-                val extractedCategories = mutableSetOf<String>()
-                var extractedCount = 0
+                var hasOnnx = false
+                var hasTokens = false
                 var lastUpdatePercent = -1
 
                 FileInputStream(archive).use { fis ->
@@ -497,28 +435,24 @@ class ModelManager(private val context: Context) {
                             while (entry != null) {
                                 if (!entry.isDirectory) {
                                     val name = entry.name
-                                    val isEncoder = name.contains("encoder") && name.contains("int8") && name.endsWith(".onnx")
-                                    val isDecoder = name.contains("decoder") && name.contains("int8") && name.endsWith(".onnx")
-                                    val isTokens = name.contains("tokens.txt")
+                                    // 内容驱动：保留压缩包内的原始文件名，不做按类型重命名。
+                                    // 这样 Whisper 的 encoder/decoder、SenseVoice 的 model.onnx、
+                                    // 以及将来任何新模型都能原样落盘，由 WhisperWrapper 按文件自动识别类型。
+                                    val isOnnx = name.endsWith(".onnx", ignoreCase = true)
+                                    val isTokens = name.endsWith("tokens.txt", ignoreCase = true)
 
                                     val destName: String? = when {
-                                        isEncoder && "encoder" !in extractedCategories -> "$prefix-encoder.int8.onnx"
-                                        isDecoder && "decoder" !in extractedCategories -> "$prefix-decoder.int8.onnx"
-                                        isTokens && "tokens" !in extractedCategories -> "$prefix-tokens.txt"
+                                        isOnnx -> name.substringAfterLast("/")
+                                        isTokens -> "tokens.txt"
                                         else -> null
                                     }
 
                                     if (destName != null) {
-                                        val category = when {
-                                            isEncoder -> "encoder"
-                                            isDecoder -> "decoder"
-                                            else -> "tokens"
-                                        }
                                         val destFile = File(tempDir, destName)
                                         val tarSize = entry.size
                                         var copiedBytes = 0L
                                         Log.d(TAG, ">>> Extracting: ${entry.name} -> $destName (${tarSize} bytes)")
-                                        
+
                                         FileOutputStream(destFile).use { out ->
                                             val buf = ByteArray(64 * 1024)
                                             var l: Int
@@ -533,16 +467,10 @@ class ModelManager(private val context: Context) {
                                                 }
                                             }
                                         }
-                                        extractedCategories.add(category)
-                                        extractedCount++
+                                        if (isOnnx) hasOnnx = true
+                                        if (isTokens) hasTokens = true
                                         Log.d(TAG, "[SUCCESS] Extracted $destName (${destFile.length()} bytes)")
                                     }
-                                }
-                                
-                                // 关键优化：如果 3 个文件都拿到了，直接收工，不再扫描后面几百MB的数据
-                                if (extractedCategories.size == 3) {
-                                    Log.i(TAG, "Found all required files. Stopping extraction early.")
-                                    break 
                                 }
                                 entry = tarIn.nextEntry
                             }
@@ -550,7 +478,8 @@ class ModelManager(private val context: Context) {
                     }
                 }
 
-                if (extractedCategories.size == 3) {
+                // 只要拿到至少一个 onnx + tokens.txt 就认为解压成功（模型类型由文件内容决定）
+                if (hasOnnx && hasTokens) {
                     if (modelDir.exists()) modelDir.deleteRecursively()
                     if (tempDir.renameTo(modelDir)) {
                         Log.i(TAG, "Successfully moved $tempDir to $modelDir")
@@ -559,7 +488,7 @@ class ModelManager(private val context: Context) {
                         tempDir.copyRecursively(modelDir, overwrite = true)
                     }
                 } else {
-                    Log.w(TAG, "Only extracted ${extractedCategories.size}/3 files. Missing: ${setOf("encoder", "decoder", "tokens") - extractedCategories}")
+                    Log.w(TAG, "Extraction incomplete: hasOnnx=$hasOnnx, hasTokens=$hasTokens")
                 }
                 Log.i(TAG, "[SUCCESS] Installation of $modelId finished.")
             }
@@ -571,7 +500,7 @@ class ModelManager(private val context: Context) {
             if (tempDir.exists()) tempDir.deleteRecursively()
             // 1. 先从集合中移除，这样接下来的 isModelReady 就能返回 true
             extractingModels.remove(modelId)
-            
+
             // 2. 在 IO 线程直接计算最终状态并更新 Flow，确保 UI 第一时间收到
             val isReady = isModelReady(modelId)
             val finalStatus = if (isReady) ModelStatus.READY else ModelStatus.NOT_DOWNLOADED
@@ -604,14 +533,28 @@ class ModelManager(private val context: Context) {
             refreshStatuses()
         }
     }
-    fun getSelectedModelId(): String = context.getSharedPreferences("settings", Context.MODE_PRIVATE).getString("selected_model", "whisper-tiny") ?: "whisper-tiny"
+    // 返回当前选中的 ASR 模型；若保存的 id 不存在或不可用，则回退到第一个就绪的 ASR 模型
+    // （按内容归类，含历史遗留的 whisper-small 等）。静态占位 whisper-tiny 等永远不会被安装，故不默认。
+    fun getSelectedModelId(): String {
+        val saved = context.getSharedPreferences("settings", Context.MODE_PRIVATE).getString("selected_model", "") ?: ""
+        if (saved.isNotEmpty() && isModelReady(saved)) return saved
+        // 只从真实存在的模型（_customModels）中回退选择，静态占位永远不就绪，跳过。
+        return _customModels.value.firstOrNull { it.category == ModelCategory.ASR && isModelReady(it.id) }?.id ?: ""
+    }
     fun setSelectedModelId(modelId: String) {
         Log.i(TAG, "Setting selected model to: $modelId")
         context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putString("selected_model", modelId).apply()
         _settingsChanged.update { it + 1 }
     }
 
-    fun getSelectedLlmModelId(): String = context.getSharedPreferences("settings", Context.MODE_PRIVATE).getString("selected_llm_model", "llm-gemma-2b") ?: "llm-gemma-2b"
+    // 返回当前选中的 LLM 模型；若保存的 id 不存在或不可用，则回退到第一个就绪的 LLM 模型
+    // （按内容归类）。静态占位 llm-gemma-2b 不会被安装，故不默认。
+    fun getSelectedLlmModelId(): String {
+        val saved = context.getSharedPreferences("settings", Context.MODE_PRIVATE).getString("selected_llm_model", "") ?: ""
+        if (saved.isNotEmpty() && isModelReady(saved)) return saved
+        // 只从真实存在的模型（_customModels）中回退选择，静态占位永远不就绪，跳过。
+        return _customModels.value.firstOrNull { it.category == ModelCategory.LLM && isModelReady(it.id) }?.id ?: ""
+    }
     fun setSelectedLlmModelId(modelId: String) {
         Log.i(TAG, "Setting selected LLM model to: $modelId")
         context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putString("selected_llm_model", modelId).apply()
@@ -640,6 +583,15 @@ class ModelManager(private val context: Context) {
         }
         Log.i(TAG, "Setting audio source to: $sourceName")
         context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putInt("audio_source", source).apply()
+        _settingsChanged.update { it + 1 }
+    }
+
+    // LLM 润色开关：默认开启。关闭后管线不再初始化 LLM，也不对原始稿做语义分段润色。
+    fun isLlmPolishingEnabled(): Boolean =
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean("llm_polishing_enabled", true)
+    fun setLlmPolishingEnabled(enabled: Boolean) {
+        Log.i(TAG, "Setting LLM polishing enabled to: $enabled")
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putBoolean("llm_polishing_enabled", enabled).apply()
         _settingsChanged.update { it + 1 }
     }
 }

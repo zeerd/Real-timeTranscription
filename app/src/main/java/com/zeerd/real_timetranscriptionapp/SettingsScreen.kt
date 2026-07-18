@@ -1,10 +1,12 @@
 package com.zeerd.real_timetranscriptionapp
 
+import android.content.Intent
 import android.media.MediaRecorder
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -12,14 +14,18 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
@@ -35,13 +41,12 @@ fun SettingsScreen(
 ) {
     val modelStatuses by modelManager.modelStatuses.collectAsState()
     val customModels by modelManager.customModels.collectAsState()
-    
-    val allModels = remember(customModels) { modelManager.availableModels }
 
     val selectedModelId = remember { mutableStateOf(modelManager.getSelectedModelId()) }
     val selectedLlmModelId = remember { mutableStateOf(modelManager.getSelectedLlmModelId()) }
     val selectedSpeakerModelId = remember { mutableStateOf(modelManager.getSelectedSpeakerModelId()) }
     val selectedAudioSource = remember { mutableIntStateOf(modelManager.getAudioSource()) }
+    val llmPolishingEnabled = remember { mutableStateOf(modelManager.isLlmPolishingEnabled()) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
@@ -52,9 +57,6 @@ fun SettingsScreen(
         AudioSourceOption("UNPROCESSED", 9 /* MediaRecorder.AudioSource.UNPROCESSED */, "Raw audio with minimal system processing. (API 24+)")
     )
 
-    var showImportDialog by remember { mutableStateOf(false) }
-    var targetModelIdForImport by remember { mutableStateOf("") }
-    
     // Delete Confirmation Dialog
     var modelToDelete by remember { mutableStateOf<ModelInfo?>(null) }
 
@@ -109,15 +111,17 @@ fun SettingsScreen(
         }
     }
 
-    val whisperArchivePickerLauncher = rememberLauncherForActivityResult(
+    // 内容驱动导入：不询问模型类型，压缩包里的 .onnx + tokens.txt 原样解压，
+    // 类型由 WhisperWrapper 按文件自动识别，自动分配 custom-asr-* 目录。
+    val asrArchivePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
-        if (uri != null && targetModelIdForImport.isNotEmpty()) {
-            Log.i("SettingsScreen", "[USER_ACTION] Whisper archive picker returned uri=$uri for model=$targetModelIdForImport")
+        if (uri != null) {
+            Log.i("SettingsScreen", "[USER_ACTION] ASR archive picker returned uri=$uri")
             scope.launch {
                 try {
                     Toast.makeText(context, "Importing archive...", Toast.LENGTH_SHORT).show()
-                    modelManager.importFromArchive(targetModelIdForImport, uri)
+                    modelManager.importAsrArchive(uri)
                     Toast.makeText(context, "Import successful!", Toast.LENGTH_SHORT).show()
                 } catch (e: Exception) {
                     Toast.makeText(context, "Import failed: ${e.message}", Toast.LENGTH_LONG).show()
@@ -151,37 +155,6 @@ fun SettingsScreen(
                 }
             }
         }
-    }
-
-    if (showImportDialog) {
-        AlertDialog(
-            onDismissRequest = { showImportDialog = false },
-            title = { Text("Select Whisper Specification") },
-            text = { Text("Which Whisper model does this archive contain?") },
-            confirmButton = {
-                Column {
-                    allModels.filter { it.id.startsWith("whisper") }.forEach { model ->
-                        TextButton(
-                            onClick = {
-                                Log.i("SettingsScreen", "[USER_ACTION] Import dialog: selected spec '${model.id}' for archive import")
-                                targetModelIdForImport = model.id
-                                showImportDialog = false
-                                whisperArchivePickerLauncher.launch(arrayOf("application/x-bzip2", "application/octet-stream", "*/*"))
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(model.name)
-                        }
-                    }
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    Log.d("SettingsScreen", "[USER_ACTION] Cancelled import dialog")
-                    showImportDialog = false
-                }) { Text("Cancel") }
-            }
-        )
     }
 
     Scaffold(
@@ -255,57 +228,78 @@ fun SettingsScreen(
                     text = "VAD Model",
                     style = MaterialTheme.typography.titleLarge
                 )
-                Text(
-                    text = "Voice Activity Detection is required to segment audio.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color.Gray
-                )
-            }
-
-            items(allModels.filter { it.id == "vad-silero" }) { model ->
-                val status = modelStatuses[model.id] ?: ModelStatus.NOT_DOWNLOADED
-                ModelItem(
-                    model = model,
-                    status = status,
-                    isSelected = false,
-                    onSelect = {},
-                    onDownload = {
-                        Log.i("SettingsScreen", "[USER_ACTION] Download requested for VAD model: ${model.id}")
-                        modelManager.downloadModel(model)
-                    },
-                    onDelete = { modelToDelete = it },
-                    isVad = true
-                )
+                // VAD 已打包进 APK（assets/silero_vad.onnx），运行时直接从 asset 加载，
+                // 始终可用，无需导入、也不提供下载链接。这里只做状态说明。
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "Silero VAD (built-in)",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Voice Activity Detection is required to segment audio. This model is bundled with the app and always available — no import or download needed.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color.Gray
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Status: Ready",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
             }
 
             item {
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
-                    text = "Whisper ASR Models",
+                    text = "ASR Models",
                     style = MaterialTheme.typography.titleLarge
                 )
                 Text(
-                    text = "Larger models are more accurate but slower and use more memory.",
+                    text = "All models are installed by importing files you downloaded manually. The links below are optional defaults — you may download any sherpa-onnx supported model instead.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = Color.Gray
                 )
-                
+
                 Spacer(modifier = Modifier.height(8.dp))
-                
+
                 Button(
                     onClick = {
-                        Log.d("SettingsScreen", "[USER_ACTION] Opening Whisper archive import dialog")
-                        showImportDialog = true
+                        Log.d("SettingsScreen", "[USER_ACTION] Opening ASR archive import picker (content-driven)")
+                        asrArchivePickerLauncher.launch(arrayOf("application/x-bzip2", "application/octet-stream", "*/*"))
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Icon(Icons.Default.FolderOpen, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Import Whisper Archive (.tar.bz2)")
+                    Text("Import ASR Archive (.tar.bz2)")
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Optional default model downloads:",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Color.Gray
+                )
+                // 可点击的下载链接列表（不再提供下载按钮，仅作参考链接）
+                val asrLinks = modelManager.defaultDownloadLinks.filter {
+                    it.id.startsWith("whisper") || it.id.contains("sense", ignoreCase = true)
+                }
+                asrLinks.forEach { link ->
+                    DownloadLinkRow(name = link.name, url = link.encoderUrl)
                 }
             }
 
-            items(allModels.filter { it.id.startsWith("whisper") }) { model ->
+            // 只展示已安装且归类为 ASR 的模型（含历史遗留的 whisper-small 等）。静态占位项
+            // （whisper-tiny/base/small、SenseVoiceSmall）不会被应用内安装，故不列出，避免
+            // 永远显示 "Not Installed" 的死行。customModels 仅含磁盘上真实存在的目录。
+            items(customModels.filter { it.category == ModelCategory.ASR }) { model ->
                 val status = modelStatuses[model.id] ?: ModelStatus.NOT_DOWNLOADED
                 val isSelected = selectedModelId.value == model.id
 
@@ -315,16 +309,12 @@ fun SettingsScreen(
                     isSelected = isSelected,
                     onSelect = {
                         if (status == ModelStatus.READY) {
-                            Log.i("SettingsScreen", "[USER_ACTION] Whisper model selected: ${model.id}")
+                            Log.i("SettingsScreen", "[USER_ACTION] ASR model selected: ${model.id}")
                             modelManager.setSelectedModelId(model.id)
                             selectedModelId.value = model.id
                         } else {
-                            Log.w("SettingsScreen", "[USER_ACTION] Whisper model '${model.id}' not READY, selection ignored")
+                            Log.w("SettingsScreen", "[USER_ACTION] ASR model '${model.id}' not READY, selection ignored")
                         }
-                    },
-                    onDownload = {
-                        Log.i("SettingsScreen", "[USER_ACTION] Download requested for Whisper model: ${model.id}")
-                        modelManager.downloadModel(model)
                     },
                     onDelete = { modelToDelete = it }
                 )
@@ -355,9 +345,22 @@ fun SettingsScreen(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Import Speaker Model (.onnx)")
                 }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Optional default model downloads:",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Color.Gray
+                )
+                modelManager.defaultDownloadLinks.filter { it.id == "speaker-ecapa" }.forEach { link ->
+                    DownloadLinkRow(name = link.name, url = link.encoderUrl)
+                }
             }
 
-            items(allModels.filter { it.id == "speaker-ecapa" || it.id.startsWith("custom-speaker-") }) { model ->
+            // 只展示已安装且归类为说话人的模型（含历史遗留的 speaker-ecapa 等）。静态占位
+            // speaker-ecapa 不会被应用内安装，故不列出，避免永远显示 "Not Installed" 的死行。
+            // customModels 仅含磁盘上真实存在的目录。
+            items(customModels.filter { it.category == ModelCategory.SPEAKER }) { model ->
                 val status = modelStatuses[model.id] ?: ModelStatus.NOT_DOWNLOADED
                 val isSelected = selectedSpeakerModelId.value == model.id
 
@@ -375,7 +378,6 @@ fun SettingsScreen(
                             Log.w("SettingsScreen", "[SPEAKER_SELECT] ignored, model not READY")
                         }
                     },
-                    onDownload = { modelManager.downloadModel(model) },
                     onDelete = { modelToDelete = it }
                 )
             }
@@ -387,13 +389,48 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.titleLarge
                 )
                 Text(
-                    text = "Used for semantic paragraphing and formatting. You can download Gemma 2B or import your own .tflite model.",
+                    text = "Used for semantic paragraphing and formatting. Import your own .tflite model, or use the optional default link below.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = Color.Gray
                 )
-                
+
                 Spacer(modifier = Modifier.height(8.dp))
-                
+
+                // LLM 润色开关：关闭后不再对原始稿做语义分段润色，仅保留实时原始转写
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Enable LLM Polishing",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            Text(
+                                text = "When off, only the raw ASR transcript is kept; no semantic formatting is applied.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.Gray
+                            )
+                        }
+                        Switch(
+                            checked = llmPolishingEnabled.value,
+                            onCheckedChange = {
+                                Log.i("SettingsScreen", "[USER_ACTION] LLM polishing toggled: $it")
+                                modelManager.setLlmPolishingEnabled(it)
+                                llmPolishingEnabled.value = it
+                            }
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
                 Button(
                     onClick = {
                         Log.d("SettingsScreen", "[USER_ACTION] Opening LiteRT (.tflite) import picker")
@@ -405,9 +442,22 @@ fun SettingsScreen(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Import LiteRT Model (.tflite)")
                 }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Optional default model downloads:",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Color.Gray
+                )
+                modelManager.defaultDownloadLinks.filter { it.id.startsWith("llm") }.forEach { link ->
+                    DownloadLinkRow(name = link.name, url = link.encoderUrl)
+                }
             }
 
-            items(allModels.filter { it.id.startsWith("llm") || it.id.startsWith("custom-llm") }) { model ->
+            // 只展示已安装且归类为 LLM 的模型（含历史遗留的 llm-* 等）。静态占位
+            // llm-gemma-2b 不会被应用内安装，故不列出，避免永远显示 "Not Installed" 的死行。
+            // customModels 仅含磁盘上真实存在的目录。
+            items(customModels.filter { it.category == ModelCategory.LLM }) { model ->
                 val status = modelStatuses[model.id] ?: ModelStatus.NOT_DOWNLOADED
                 val isSelected = selectedLlmModelId.value == model.id
 
@@ -424,14 +474,46 @@ fun SettingsScreen(
                             Log.w("SettingsScreen", "[USER_ACTION] LLM model '${model.id}' not READY, selection ignored")
                         }
                     },
-                    onDownload = {
-                        Log.i("SettingsScreen", "[USER_ACTION] Download requested for LLM model: ${model.id}")
-                        modelManager.downloadModel(model)
-                    },
                     onDelete = { modelToDelete = it }
                 )
             }
         }
+    }
+}
+
+// 可点击的下载链接行：仅作为参考链接，点击后用浏览器打开，不触发应用内下载。
+@Composable
+fun DownloadLinkRow(name: String, url: String) {
+    val context = LocalContext.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                Log.i("SettingsScreen", "[USER_ACTION] Opening download link: $url")
+                try {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                } catch (e: Exception) {
+                    Log.e("SettingsScreen", "[DOWNLOAD_LINK] failed to open: $url", e)
+                }
+            }
+            .padding(vertical = 8.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Default.Link,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = buildAnnotatedString {
+                withStyle(style = SpanStyle(color = MaterialTheme.colorScheme.primary, textDecoration = TextDecoration.Underline)) {
+                    append(name)
+                }
+            },
+            style = MaterialTheme.typography.bodyMedium
+        )
     }
 }
 
@@ -441,7 +523,6 @@ fun ModelItem(
     status: ModelStatus,
     isSelected: Boolean,
     onSelect: () -> Unit,
-    onDownload: () -> Unit,
     onDelete: (ModelInfo) -> Unit = {},
     isVad: Boolean = false
 ) {
@@ -525,12 +606,7 @@ fun ModelItem(
                     }
                 }
                 is ModelStatus.NOT_DOWNLOADED -> {
-                    IconButton(onClick = {
-                        Log.i("SettingsScreen", "[USER_ACTION] Download icon clicked for model: ${model.id}")
-                        onDownload()
-                    }) {
-                        Icon(Icons.Default.Download, contentDescription = "Download")
-                    }
+                    Text("Not installed", color = Color.Gray)
                 }
                 is ModelStatus.ERROR -> {
                     Text("Error", color = Color.Red)

@@ -5,10 +5,15 @@ import android.util.Log
 import com.k2fsa.sherpa.onnx.*
 import java.io.File
 import kotlin.math.sqrt
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 data class RawSpeakerTurn(
     val speakerId: String,
+    // 语音段结束时间（解析完成时记录），用于 MAX_CHARS 兜底与日志
     val timestampMs: Long,
+    // 语音段开始时间（VAD 进入 RECORDING 时记录），用于计算段间真实停顿
+    val startTimestampMs: Long,
     val rawText: String
 )
 
@@ -24,6 +29,8 @@ class SpeakerDiarizationManager(
     private val profileUpdateRate = 0.25f
     // 记录上一次识别出的说话人，用于极短片段回退
     private var lastSpeakerId: String? = null
+    // extractor 非线程安全：pipeline 的实时滑窗检测与 MainActivity 的事后标注会并发访问，统一加锁
+    private val extractorMutex = Mutex()
 
     init {
         Log.i(TAG, "[V2_DIARIZATION] Initializing with model: $modelPath")
@@ -91,6 +98,14 @@ class SpeakerDiarizationManager(
         val embedding = extractor.compute(stream)
         stream.release()
         return embedding
+    }
+
+    /**
+     * 线程安全的声纹向量提取，供实时滑窗换人检测（SpeakerChangeDetector）复用同一 extractor。
+     * 加锁避免与 [identifySpeaker] 并发访问底层 C++ extractor 导致状态错乱。
+     */
+    suspend fun extractEmbeddingSafe(audioSegment: FloatArray): FloatArray = extractorMutex.withLock {
+        extractEmbedding(audioSegment)
     }
 
     private fun calculateCosineSimilarity(vectorA: FloatArray, vectorB: FloatArray): Float {

@@ -1,6 +1,7 @@
 package com.zeerd.real_timetranscriptionapp
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.MediaRecorder
 import android.os.Bundle
@@ -17,6 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
@@ -38,8 +40,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
+private const val TAG = "MainActivity"
+
 class MainActivity : ComponentActivity() {
-    private val TAG = "MainActivity"
     private val transcriptions = mutableStateListOf<String>()
     private val regularizedTranscriptions = mutableStateListOf<String>()
     private val isRecording = mutableStateOf(false)
@@ -47,7 +50,11 @@ class MainActivity : ComponentActivity() {
     private val saveLocationDescription = mutableStateOf("")
     
     private val audioChannel = Channel<ByteArray>(100)
-    private val transcriptionChannel = Channel<AudioTextPair>(Channel.CONFLATED)
+    // 注意：不能用 CONFLATED！接收循环在消费每条结果时还要做数百 ms 的声纹提取
+    // （identifySpeaker），若期间 pipeline 又送来新段，CONFLATED 会直接覆盖并丢弃尚未读取的
+    // 缓冲段，导致"10 句只识别 8 句"。改为无界缓冲，与 LocalLlmManager 的 processingChannel
+    // 保持一致，避免处理期间覆盖丢段。（每段 rawAudio 为 FloatArray，内存占用由实时消费速度兜底）
+    private val transcriptionChannel = Channel<AudioTextPair>(Channel.UNLIMITED)
     
     private var whisperWrapper: WhisperWrapper? = null
     private var vadWrapper: SileroVadWrapper? = null
@@ -64,7 +71,8 @@ class MainActivity : ComponentActivity() {
     ) { isGranted: Boolean ->
         Log.d(TAG, "Permission RECORD_AUDIO granted: $isGranted")
         if (isGranted) {
-            startAudioPipeline()
+            // 授权后走统一入口，复用变化检测逻辑启动管线
+            checkAndStartPipeline()
         } else {
             val msg = "Permission denied. App cannot record audio."
             Log.e(TAG, "[UI_MSG] $msg")
@@ -87,18 +95,25 @@ class MainActivity : ComponentActivity() {
                 
                 NavHost(navController = navController, startDestination = "transcription") {
                     composable("transcription") {
-                        val createDocumentLauncher = rememberLauncherForActivityResult(
-                            contract = ActivityResultContracts.CreateDocument("text/plain")
+                        val openDocumentTreeLauncher = rememberLauncherForActivityResult(
+                            contract = ActivityResultContracts.OpenDocumentTree()
                         ) { uri ->
                             if (uri != null) {
-                                Log.d(TAG, "[USER_ACTION] User selected a save file via picker: $uri")
+                                Log.d(TAG, "[USER_ACTION] User selected a save directory via picker: $uri")
+                                // 持久化目录访问权限，避免后续写入被系统拒绝
+                                contentResolver.takePersistableUriPermission(
+                                    uri,
+                                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                                )
                                 lifecycleScope.launch {
-                                    fileManager.setUserSelectedUri(uri)
+                                    fileManager.setUserSelectedDir(uri)
                                     saveLocationDescription.value = fileManager.getCurrentSaveLocation()
-                                    Log.d(TAG, "User selected save file: $uri")
+                                    Log.d(TAG, "User selected save dir: $uri")
                                 }
                             } else {
-                                Log.d(TAG, "[USER_ACTION] User cancelled save-file picker (no URI returned)")
+                                Log.d(TAG, "[USER_ACTION] User cancelled save-dir picker (no URI returned)")
+                            }
+                        }
 
                         Scaffold(
                             modifier = Modifier.fillMaxSize(),
@@ -115,10 +130,10 @@ class MainActivity : ComponentActivity() {
                                     }
                                     Spacer(modifier = Modifier.height(16.dp))
                                     FloatingActionButton(onClick = {
-                                        Log.d(TAG, "[USER_ACTION] Opening save-file picker")
-                                        createDocumentLauncher.launch("transcription_${System.currentTimeMillis()}.txt")
+                                        Log.d(TAG, "[USER_ACTION] Opening save-dir picker")
+                                        openDocumentTreeLauncher.launch(null)
                                     }) {
-                                        Icon(Icons.Default.Save, contentDescription = "Set Save File")
+                                        Icon(Icons.Default.Save, contentDescription = "Set Save Directory")
                                     }
                                 }
                             }
@@ -129,6 +144,16 @@ class MainActivity : ComponentActivity() {
                                 isRecording = isRecording.value,
                                 volumeLevel = volumeLevel.value,
                                 saveLocation = saveLocationDescription.value,
+                                llmPolishingEnabled = modelManager.isLlmPolishingEnabled(),
+                                onResetHistory = {
+                                    lifecycleScope.launch {
+                                        fileManager.clearAutosaveHistory()
+                                        withContext(Dispatchers.Main) {
+                                            transcriptions.clear()
+                                            regularizedTranscriptions.clear()
+                                        }
+                                    }
+                                },
                                 modifier = Modifier.padding(innerPadding)
                             )
                         }
@@ -190,22 +215,30 @@ class MainActivity : ComponentActivity() {
         val selectedLlmId = modelManager.getSelectedLlmModelId()
         val selectedAudioSource = modelManager.getAudioSource()
         val isReady = modelManager.isModelReady(selectedId)
-        
-        // 使用 Info 级别日志，并显示易读的字符串名称
-        Log.i(TAG, "Pipeline Sync Check: whisper=$selectedId, llm=$selectedLlmId, audioSource=${getAudioSourceName(selectedAudioSource)}, runningModel=$currentModelId, starting=$isPipelineStarting")
 
-        if (isReady) {
-            if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                // 如果发现音源或者模型变了，就重启 (这里简单比较 whisper 模型，LLM 可以在运行中切换或重启)
-                if (currentModelId != selectedId || currentAudioSource != selectedAudioSource) {
-                    if (isPipelineStarting) {
-                        Log.w(TAG, "Pipeline is already starting, skipping duplicate call")
-                        return
-                    }
-                    Log.i(TAG, "Change detected. Restarting pipeline...")
-                    startAudioPipeline()
-                }
+        // 使用 Info 级别日志，并显示易读的字符串名称
+        Log.i(TAG, "Pipeline Sync Check: whisper=$selectedId, llm=$selectedLlmId, audioSource=${getAudioSourceName(selectedAudioSource)}, runningModel=$currentModelId, starting=$isPipelineStarting, ready=$isReady")
+
+        if (!isReady) {
+            Log.w(TAG, "Pipeline not ready (no ASR model selected/ready), skipping start")
+            return
+        }
+
+        // 模型就绪但缺少麦克风权限时，主动请求权限（之前从未发起请求，导致静默不启动）
+        if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            Log.i(TAG, "RECORD_AUDIO permission not granted, requesting...")
+            requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+
+        // 如果发现音源或者模型变了，就重启 (这里简单比较 whisper 模型，LLM 可以在运行中切换或重启)
+        if (currentModelId != selectedId || currentAudioSource != selectedAudioSource) {
+            if (isPipelineStarting) {
+                Log.w(TAG, "Pipeline is already starting, skipping duplicate call")
+                return
             }
+            Log.i(TAG, "Change detected. Restarting pipeline...")
+            startAudioPipeline()
         }
     }
 
@@ -218,13 +251,26 @@ class MainActivity : ComponentActivity() {
                     transcriptions.addAll(history)
                 }
             }
+            val formalHistory = fileManager.getFormalHistory()
+            if (formalHistory.isNotEmpty()) {
+                withContext(Dispatchers.Main) {
+                    regularizedTranscriptions.clear()
+                    regularizedTranscriptions.addAll(formalHistory)
+                }
+            }
         }
     }
 
     private fun startAudioPipeline() {
         val modelId = modelManager.getSelectedModelId()
+        // 没有任何已导入且就绪的 ASR 模型时，不启动管线（避免用空 id 构造 WhisperWrapper 崩溃）
+        if (modelId.isEmpty() || !modelManager.isModelReady(modelId)) {
+            Log.w(TAG, ">>> No ready ASR model selected (modelId='$modelId'), skipping pipeline start")
+            isPipelineStarting = false
+            return
+        }
         val modelDir = modelManager.getModelDir(modelId)
-        
+
         Log.i(TAG, ">>> RESTARTING AUDIO PIPELINE with model: $modelId")
         
         // 立即标记正在启动，防止 checkAndStartPipeline 重复调用
@@ -255,6 +301,8 @@ class MainActivity : ComponentActivity() {
                     Log.d(TAG, "Initializing Native components...")
                     val vad = SileroVadWrapper(this@MainActivity)
                     val whisper = WhisperWrapper(this@MainActivity, modelId, modelDir)
+                    // 调试：把每段识别音频落盘到内部存储的 wav_dump 目录，方便试听核对漏字
+                    whisper.dumpDir = File(filesDir, "wav_dump")
                     
                     // Initialize Diarization and LLM if their models are ready
                     // 使用用户在设置中选中的说话人模型（未选中则回退到任意就绪的说话人模型）
@@ -281,12 +329,12 @@ class MainActivity : ComponentActivity() {
                     
                     val selectedLlmId = modelManager.getSelectedLlmModelId()
                     val llmModelDir = modelManager.getModelDir(selectedLlmId)
-                    if (modelManager.isModelReady(selectedLlmId)) {
+                    if (modelManager.isLlmPolishingEnabled() && modelManager.isModelReady(selectedLlmId)) {
                         Log.i(TAG, "[V2_PIPELINE] LLM model $selectedLlmId is ready, enabling Regularization")
                         val manager = LocalLlmManager(this@MainActivity, llmModelDir)
                         llmManager = manager
                     } else {
-                        Log.w(TAG, "[V2_PIPELINE] LLM model $selectedLlmId is NOT ready. Regularization disabled.")
+                        Log.w(TAG, "[V2_PIPELINE] LLM Regularization disabled (enabled=${modelManager.isLlmPolishingEnabled()}, modelReady=${modelManager.isModelReady(selectedLlmId)}).")
                     }
 
                     // 赋值给成员变量以便管理
@@ -312,6 +360,10 @@ class MainActivity : ComponentActivity() {
                         if (text.isNotBlank()) {
                             regularizedTranscriptions.add(0, text)
                             Log.i(TAG, "[V2_UI] New regularized block added to UI")
+                            // 同时保存 LLM 润色后的正式稿（与原始 ASR 结果分开保存）
+                            launch(Dispatchers.IO) {
+                                fileManager.saveRegularized(text)
+                            }
                         }
                     }
                 }
@@ -325,7 +377,11 @@ class MainActivity : ComponentActivity() {
 
                 val audioSource = modelManager.getAudioSource()
                 val recorder = AudioRecorder(audioChannel, audioSource)
-                val pipeline = TranscriptionPipeline(audioChannel, vad, whisper, transcriptionChannel)
+                // 声纹滑窗换人检测：复用 diarizationManager 的同一 extractor，避免重复加载模型
+                val speakerChangeDetector = diarizationManager?.let { dm ->
+                    SpeakerChangeDetector(extractEmbedding = { audio -> dm.extractEmbeddingSafe(audio) })
+                }
+                val pipeline = TranscriptionPipeline(audioChannel, vad, whisper, transcriptionChannel, speakerChangeDetector)
 
                 launch {
                     pipeline.vadState.collect { state ->
@@ -364,7 +420,7 @@ class MainActivity : ComponentActivity() {
                                 Log.d(TAG, "[UI_MSG] Transcription added: $displayResult")
                                 
                                 // Add to semantic buffer for LLM regularization
-                                semanticBuffer.addTurn(RawSpeakerTurn(speakerId, System.currentTimeMillis(), result))
+                                semanticBuffer.addTurn(RawSpeakerTurn(speakerId, System.currentTimeMillis(), pair.segmentStartTimestampMs, result))
 
                                 // Auto-save to file (IO bound)
                                 launch(Dispatchers.IO) {
@@ -385,6 +441,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         Log.d(TAG, "onDestroy, closing resources")
+        semanticBuffer.release()
         whisperWrapper?.close()
         diarizationManager?.release()
         llmManager?.release()
@@ -398,10 +455,38 @@ fun TranscriptionScreen(
     isRecording: Boolean,
     volumeLevel: Float,
     saveLocation: String,
+    llmPolishingEnabled: Boolean,
+    onResetHistory: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var selectedTab by remember { mutableIntStateOf(1) }
+    // 默认标签页：LLM 润色开启时显示「正式稿」(1)，关闭时显示「实时流」(0)
+    var selectedTab by remember { mutableIntStateOf(if (llmPolishingEnabled) 1 else 0) }
     val tabs = listOf("实时流 (Raw)", "正式稿 (Formal)")
+    var showResetDialog by remember { mutableStateOf(false) }
+
+    if (showResetDialog) {
+        AlertDialog(
+            onDismissRequest = { showResetDialog = false },
+            title = { Text("Clear Autosave History?") },
+            text = { Text("This will permanently delete the internal autosave transcription history. This cannot be undone.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        Log.i(TAG, "[USER_ACTION] Confirmed clear autosave history")
+                        showResetDialog = false
+                        onResetHistory()
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = Color.Red)
+                ) { Text("Clear") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    Log.d(TAG, "[USER_ACTION] Cancelled clear autosave history dialog")
+                    showResetDialog = false
+                }) { Text("Cancel") }
+            }
+        )
+    }
 
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
         Row(
@@ -413,6 +498,14 @@ fun TranscriptionScreen(
                 text = "Real-time Transcription",
                 style = MaterialTheme.typography.headlineSmall
             )
+            IconButton(
+                onClick = {
+                    Log.d(TAG, "[USER_ACTION] Reset autosave history button pressed")
+                    showResetDialog = true
+                }
+            ) {
+                Icon(Icons.Default.Delete, contentDescription = "Clear Autosave History")
+            }
         }
         
         SecondaryTabRow(selectedTabIndex = selectedTab, modifier = Modifier.padding(vertical = 8.dp)) {

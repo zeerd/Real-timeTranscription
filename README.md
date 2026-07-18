@@ -51,7 +51,10 @@ flowchart
 
 | 文件 | 职责 |
 | :--- | :--- |
-| `MainActivity.kt` | 入口 Activity，Compose 导航（转写页 / 设置页），持有各管理器与通道，驱动录制与管线启动 |
+| `MainActivity.kt` | 入口 Activity，Compose 导航（转写页 / 设置页）。仅负责 UI 渲染与订阅 `TranscriptionState`，不再持有任何 Native 资源或录音协程 |
+| `TranscriptionApplication.kt` | `Application` 子类，持有跨 Activity / Service 共享的 `ModelManager` 与 `TranscriptionFileManager` 单例，并创建前台服务通知渠道 |
+| `TranscriptionService.kt` | **前台服务**：承载整条转写管线（AudioRecorder → VAD → Whisper → 说话人分离 → 语义分段 → LLM 润色）。通过 `startForeground` + `FOREGROUND_SERVICE_TYPE_MICROPHONE` 提升为前台服务，使应用切到后台 / Activity 销毁后录音与转写仍持续运行 |
+| `TranscriptionState.kt` | 跨 Activity / Service 共享的状态单例（Flow）：服务把实时转写、正式稿、录音状态、音量推送到这里，Activity 仅订阅渲染 |
 | `AudioRecorder.kt` | 通过 `AudioRecord` 采集麦克风音频，按帧写入 `audioChannel` |
 | `AudioUtils.kt` | 音频格式转换工具（如 `ByteArray` → `FloatArray` 归一化） |
 | `SileroVadWrapper.kt` | 基于 ONNX Runtime 加载 `silero_vad.onnx`，逐帧输出语音概率，维护 V4 隐藏状态 |
@@ -73,6 +76,7 @@ flowchart
 - **无界通道防丢段**：`audioChannel` / `transcriptionChannel` / `processingChannel` 均使用 `Channel.UNLIMITED`，避免慢速处理（声纹提取、LLM 推理）期间覆盖丢弃音频段。
 - **SCD 节流**：声纹 embedding 提取开销大（数百 ms），按 200ms 滑动步长触发，避免拖慢实时性。
 - **GPU→CPU 回退**：LLM 引擎前两次尝试 GPU，失败则回退 CPU，且处理循环仅启动一次避免竞争。
+- **后台持续录音转写**：整条管线运行在 `TranscriptionService` 前台服务中（声明 `FOREGROUND_SERVICE_TYPE_MICROPHONE`），Activity 销毁 / 应用切后台后录音与转写不中断；UI 与服务通过 `TranscriptionState` 单例解耦，服务在通知栏提供「停止」入口。
 
 ---
 
@@ -97,9 +101,10 @@ flowchart
 | [`sherpa-onnx-whisper-tiny.tar.bz2`](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-tiny.tar.bz2) | TAR.BZ2 | ~150MB | Whisper Tiny ASR（多语种） |
 | [`sherpa-onnx-whisper-base.tar.bz2`](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-base.tar.bz2) | TAR.BZ2 | ~290MB | Whisper Base ASR（多语种） |
 | [`sherpa-onnx-whisper-small.tar.bz2`](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-small.tar.bz2) | TAR.BZ2 | ~960MB | Whisper Small ASR（多语种） |
-| [`sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2`](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2) | TAR.BZ2 | ~960MB | SenseVoice Small ASR（多语种） |
+| [`sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2`](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2) | TAR.BZ2 | ~240MB | SenseVoice Small ASR（多语种）（**推荐**） |
 | [`3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx`](https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx) | ONNX | ~20MB | ECAPA-TDNN 说话人分离 |
-| [`gemma-2b-it-cpu-int8.tflite`](https://huggingface.co/google/gemma-2b-it-tflite/resolve/main/gemma-2b-it-cpu-int8.tflite) | TFLite | ~1.4GB | Gemma 2B 本地 LLM 润色 |
+| [`3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx `](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx ) | ONNX | ~70MB | ECAPA-TDNN 说话人分离 （**推荐**） |
+| [`minicpm_dynamic_wi8_afp32_gpu_opt.litertlm`](https://huggingface.co/litert-community/MiniCPM5-1B/resolve/main/minicpm_dynamic_wi8_afp32_gpu_opt.litertlm?download=true)（[`modelscope`](https://www.modelscope.cn/models/litert-community/MiniCPM5-1B/files)） | TFLite | ~1.0GB | MiniCPM5 1B 本地 LLM 润色 |
 
 > Whisper / SenseVoice 解压后需含 `[prefix]-encoder.int8.onnx`、`[prefix]-decoder.int8.onnx`、`[prefix]-tokens.txt`（SenseVoice 为单 onnx）。模型存放于 `/data/user/0/com.zeerd.real_timetranscriptionapp/files/models/[model-id]/`。
 

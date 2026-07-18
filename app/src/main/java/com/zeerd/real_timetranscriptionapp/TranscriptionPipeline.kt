@@ -27,6 +27,11 @@ class TranscriptionPipeline(
     private val _vadState = MutableStateFlow(VadState.IDLE)
     val vadState = _vadState.asStateFlow()
 
+    // 实时音量电平（RMS，0~1 左右），供 UI / 通知展示麦克风活跃度。
+    // 放在管线里统一计算，避免再开一个消费者抢占 audioChannel。
+    private val _volume = MutableStateFlow(0f)
+    val volume = _volume.asStateFlow()
+
     private var silenceCount = 0
     private val speechBuffer = mutableListOf<Float>()
 
@@ -47,7 +52,13 @@ class TranscriptionPipeline(
             while (isActive) {
                 val byteBuffer = audioChannel.receive()
                 val floatFrame = byteBuffer.toFloatArrayNormalized()
-                
+
+                // 计算本帧 RMS 音量（用于 UI 指示），与 VAD 共用同一帧，零额外开销
+                var sumSq = 0.0f
+                for (s in floatFrame) sumSq += s * s
+                val rms = kotlin.math.sqrt(sumSq / floatFrame.size)
+                _volume.value = rms.coerceIn(0f, 1f)
+
                 val probability = vadWrapper.isSpeech(floatFrame)
                 val isSpeech = probability > Constants.SPEECH_PROBABILITY_THRESHOLD
 

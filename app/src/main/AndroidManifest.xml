@@ -5,8 +5,12 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <!-- 前台服务（后台持续录音转写）所需权限 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
     <application
+        android:name=".TranscriptionApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -16,6 +20,12 @@
         android:supportsRtl="true"
         android:extractNativeLibs="true"
         android:theme="@style/Theme.RealtimeTranscriptionApp">
+
+        <!-- 后台持续录音转写的前台服务 -->
+        <service
+            android:name=".TranscriptionService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
 
         <!-- 对 Android 12+ 设备，显式请求加载 vendor 层的 OpenCL 库 -->
         <uses-native-library

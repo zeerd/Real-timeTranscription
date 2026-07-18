@@ -50,36 +50,6 @@ class ModelManager(private val context: Context) {
 
     private val staticModels = listOf(
         ModelInfo(
-            id = "whisper-tiny",
-            name = "Whisper Tiny (Multi)",
-            description = "Fastest, lowest accuracy. Good for high-end devices or testing.",
-            encoderUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-tiny.tar.bz2",
-            decoderUrl = "", // We handle tar.bz2 for these
-            tokensUrl = "",
-            sizeLabel = "~150MB",
-            category = ModelCategory.ASR
-        ),
-        ModelInfo(
-            id = "whisper-base",
-            name = "Whisper Base (Multi)",
-            description = "Better accuracy than Tiny. Recommended for most users.",
-            encoderUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-base.tar.bz2",
-            decoderUrl = "",
-            tokensUrl = "",
-            sizeLabel = "~290MB",
-            category = ModelCategory.ASR
-        ),
-        ModelInfo(
-            id = "whisper-small",
-            name = "Whisper Small (Multi)",
-            description = "High accuracy. Requires more memory and processing power.",
-            encoderUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-small.tar.bz2",
-            decoderUrl = "",
-            tokensUrl = "",
-            sizeLabel = "~960MB",
-            category = ModelCategory.ASR
-        ),
-        ModelInfo(
             id = "SenseVoiceSmall",
             name = "SenseVoice Small (Multi)",
             description = "High accuracy. Requires more memory and processing power.",
@@ -93,20 +63,20 @@ class ModelManager(private val context: Context) {
             id = "speaker-ecapa",
             name = "ECAPA-TDNN Speaker Embedding",
             description = "Identifies different speakers based on voiceprints.",
-            encoderUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
+            encoderUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx",
             decoderUrl = "",
             tokensUrl = "",
-            sizeLabel = "~20MB",
+            sizeLabel = "~70MB",
             category = ModelCategory.SPEAKER
         ),
         ModelInfo(
-            id = "llm-gemma-2b",
-            name = "Gemma 2B (LiteRT)",
-            description = "Google LiteRT LM for semantic paragraphing and formatting.",
-            encoderUrl = "https://huggingface.co/google/gemma-2b-it-tflite/resolve/main/gemma-2b-it-cpu-int8.tflite", // Example URL
+            id = "llm-minicpm5-1b",
+            name = "MiniCPM5-1B (LiteRT)",
+            description = "MiniCPM5-1B is the first model in the MiniCPM5 series from OpenBMB.",
+            encoderUrl = "https://huggingface.co/litert-community/MiniCPM5-1B/resolve/main/minicpm_dynamic_wi8_afp32_gpu_opt.litertlm?download=true", 
             decoderUrl = "",
             tokensUrl = "",
-            sizeLabel = "~1.4GB",
+            sizeLabel = "~1.0GB",
             category = ModelCategory.LLM
         )
     )

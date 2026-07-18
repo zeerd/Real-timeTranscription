@@ -239,6 +239,9 @@ class TranscriptionService : Service() {
                         .firstOrNull { it.exists() }
                     if (speakerModel != null) {
                         Log.i(TAG, "[V2_PIPELINE] Speaker model found: ${speakerModel.absolutePath}, enabling Diarization")
+                        // 以声纹模型文件名（无后缀）为 key，切换命名命名空间，
+                        // 使命名与画像按模型隔离，切换模型不混淆也不丢历史。
+                        SpeakerNameStore.setActiveModel(speakerModel.nameWithoutExtension)
                         diarizationManager = SpeakerDiarizationManager(this@TranscriptionService, speakerModel.absolutePath)
                     } else {
                         Log.w(TAG, "[V2_PIPELINE] Speaker model NOT found. Diarization disabled.")
@@ -271,9 +274,11 @@ class TranscriptionService : Service() {
             llmManager?.let { mgr ->
                 observeJobs += mgr.regularizedBlocks.onEach { text ->
                     if (text.isNotBlank()) {
-                        TranscriptionState.addRegularized(text)
+                        // 把正式稿里的 [Speaker N] 标签替换为用户命名（未命名则保持原样）
+                        val named = SpeakerNameStore.substituteLabels(text)
+                        TranscriptionState.addRegularized(named)
                         Log.i(TAG, "[V2_UI] New regularized block added")
-                        launch(Dispatchers.IO) { fileManager.saveRegularized(text) }
+                        launch(Dispatchers.IO) { fileManager.saveRegularized(named) }
                     }
                 }.launchIn(serviceScope)
             }
@@ -314,7 +319,10 @@ class TranscriptionService : Service() {
                                 Log.i(TAG, "[V2_PIPELINE] Segment diarization completed. Result: $id")
                                 id
                             }
-                            val displayResult = "[$speakerId]: $result"
+                            // 登记说话人并替换为用户命名（未命名则仍是 "Speaker N"）
+                            SpeakerNameStore.register(speakerId)
+                            val displayName = SpeakerNameStore.getDisplayName(speakerId)
+                            val displayResult = "[$displayName]: $result"
                             TranscriptionState.addTranscription(displayResult)
                             Log.d(TAG, "[UI_MSG] Transcription added: $displayResult")
 

@@ -32,6 +32,8 @@ class TranscriptionApplication : Application() {
         Log.d(TAG, "onCreate: initializing shared managers")
         modelManager = ModelManager(this)
         fileManager = TranscriptionFileManager(this)
+        // 初始化说话人命名映射（speakerId → 显示名），跨重启持久化
+        SpeakerNameStore.init(this)
         createNotificationChannel()
     }
 

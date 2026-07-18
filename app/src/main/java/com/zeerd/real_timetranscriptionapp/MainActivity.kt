@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
@@ -229,6 +230,7 @@ fun TranscriptionScreen(
     var selectedTab by remember { mutableIntStateOf(if (llmPolishingEnabled) 1 else 0) }
     val tabs = listOf("实时流 (Raw)", "正式稿 (Formal)")
     var showResetDialog by remember { mutableStateOf(false) }
+    var showSpeakersDialog by remember { mutableStateOf(false) }
 
     if (showResetDialog) {
         AlertDialog(
@@ -254,6 +256,10 @@ fun TranscriptionScreen(
         )
     }
 
+    if (showSpeakersDialog) {
+        ManageSpeakersDialog(onDismiss = { showSpeakersDialog = false })
+    }
+
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -264,13 +270,23 @@ fun TranscriptionScreen(
                 text = "Real-time Transcription",
                 style = MaterialTheme.typography.headlineSmall
             )
-            IconButton(
-                onClick = {
-                    Log.d(TAG, "[USER_ACTION] Reset autosave history button pressed")
-                    showResetDialog = true
+            Row {
+                IconButton(
+                    onClick = {
+                        Log.d(TAG, "[USER_ACTION] Manage speakers button pressed")
+                        showSpeakersDialog = true
+                    }
+                ) {
+                    Icon(Icons.Default.Person, contentDescription = "Manage Speakers")
                 }
-            ) {
-                Icon(Icons.Default.Delete, contentDescription = "Clear Autosave History")
+                IconButton(
+                    onClick = {
+                        Log.d(TAG, "[USER_ACTION] Reset autosave history button pressed")
+                        showResetDialog = true
+                    }
+                ) {
+                    Icon(Icons.Default.Delete, contentDescription = "Clear Autosave History")
+                }
             }
         }
         
@@ -336,6 +352,62 @@ fun TranscriptionScreen(
             }
         }
     }
+}
+
+@Composable
+fun ManageSpeakersDialog(onDismiss: () -> Unit) {
+    // 收集当前所有出现过的说话人 ID（含未命名的），供用户命名。
+    val knownIds = remember { SpeakerNameStore.getAllKnownIds() }
+
+    // 每个说话人的编辑状态
+    val nameEdits = remember { knownIds.associateWith { mutableStateOf(SpeakerNameStore.getDisplayName(it)) } }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Manage Speakers") },
+        text = {
+            if (knownIds.isEmpty()) {
+                Text("No speakers detected yet. Start speaking to capture speakers.")
+            } else {
+                LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp)) {
+                    items(knownIds) { id ->
+                        val edit = nameEdits[id]!!
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = id,
+                                style = MaterialTheme.typography.labelMedium,
+                                modifier = Modifier.width(90.dp)
+                            )
+                            OutlinedTextField(
+                                value = edit.value,
+                                onValueChange = { edit.value = it },
+                                placeholder = { Text("Name") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    Log.i(TAG, "[USER_ACTION] Saving speaker names")
+                    knownIds.forEach { id ->
+                        SpeakerNameStore.setName(id, nameEdits[id]!!.value)
+                    }
+                    onDismiss()
+                }
+            ) { Text("Save") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
 }
 
 @Composable

@@ -3,7 +3,11 @@ package com.zeerd.real_timetranscriptionapp
 import android.content.Context
 import android.util.Log
 import com.k2fsa.sherpa.onnx.*
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import kotlin.math.sqrt
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -24,6 +28,10 @@ class SpeakerDiarizationManager(
     private val TAG = "SpeakerDiarization"
     private val extractor: SpeakerEmbeddingExtractor
     private val speakerProfiles = mutableMapOf<String, FloatArray>()
+    // 声纹画像持久化文件：以声纹模型文件名（无后缀）为前缀，按模型隔离，
+    // 切换模型时互不混淆，且切换模型不会丢失历史画像（旧模型文件仍保留，切回即恢复）。
+    private val modelKey = File(modelPath).nameWithoutExtension
+    private val profilesFile = File(context.filesDir, "speaker_profiles_$modelKey.bin")
     private val threshold = Constants.DIARIZATION_SIMILARITY_THRESHOLD
     // 画像更新系数：匹配成功后用新 embedding 平滑更新画像，避免画像停留在首句短音频而漂移
     private val profileUpdateRate = 0.25f
@@ -41,6 +49,8 @@ class SpeakerDiarizationManager(
         )
         extractor = SpeakerEmbeddingExtractor(null, config)
         Log.i(TAG, "[V2_DIARIZATION] Extractor initialized.")
+        // 恢复历史声纹画像，使重启后说话人序号与画像延续
+        loadProfiles()
     }
 
     fun identifySpeaker(audioSegment: FloatArray): String {
@@ -71,12 +81,14 @@ class SpeakerDiarizationManager(
             // 平滑更新画像，使后续同说话人匹配更稳定
             updateProfile(bestSpeakerId, embedding)
             lastSpeakerId = bestSpeakerId
+            saveProfiles()
             bestSpeakerId
         } else {
             val newId = "Speaker ${speakerProfiles.size + 1}"
             speakerProfiles[newId] = embedding
             lastSpeakerId = newId
             Log.i(TAG, "[V2_DIARIZATION] New speaker detected: $newId (maxSim: ${String.format("%.3f", maxSimilarity)}) in ${duration}ms")
+            saveProfiles()
             newId
         }
     }
@@ -106,6 +118,69 @@ class SpeakerDiarizationManager(
      */
     suspend fun extractEmbeddingSafe(audioSegment: FloatArray): FloatArray = extractorMutex.withLock {
         extractEmbedding(audioSegment)
+    }
+
+    /**
+     * 从内部存储恢复声纹画像。文件格式：
+     * [int 说话人数][(UTF id, int 维度, float[] 向量) * 说话人数]
+     * 加载失败（文件损坏/不存在）时静默忽略，从头开始聚类。
+     */
+    private fun loadProfiles() {
+        if (!profilesFile.exists()) {
+            Log.i(TAG, "[V2_DIARIZATION] No persisted speaker profiles found, starting fresh.")
+            return
+        }
+        try {
+            DataInputStream(FileInputStream(profilesFile)).use { dis ->
+                val count = dis.readInt()
+                repeat(count) {
+                    val id = dis.readUTF()
+                    val dim = dis.readInt()
+                    val arr = FloatArray(dim) { dis.readFloat() }
+                    speakerProfiles[id] = arr
+                }
+            }
+            Log.i(TAG, "[V2_DIARIZATION] Loaded ${speakerProfiles.size} speaker profiles from disk: ${speakerProfiles.keys}")
+        } catch (e: Exception) {
+            Log.e(TAG, "[V2_DIARIZATION] Failed to load speaker profiles (corrupted?), ignoring: ${e.message}", e)
+            speakerProfiles.clear()
+        }
+    }
+
+    /**
+     * 将当前声纹画像持久化到内部存储。每次新增或更新说话人时调用；
+     * 文件很小（几 KB），且说话人切换频率低（每段语音一次），同步写入不会拖慢实时管线。
+     */
+    private fun saveProfiles() {
+        try {
+            DataOutputStream(FileOutputStream(profilesFile)).use { dos ->
+                dos.writeInt(speakerProfiles.size)
+                for ((id, arr) in speakerProfiles) {
+                    dos.writeUTF(id)
+                    dos.writeInt(arr.size)
+                    for (v in arr) dos.writeFloat(v)
+                }
+            }
+            Log.d(TAG, "[V2_DIARIZATION] Saved ${speakerProfiles.size} speaker profiles to disk")
+        } catch (e: Exception) {
+            Log.e(TAG, "[V2_DIARIZATION] Failed to save speaker profiles: ${e.message}", e)
+        }
+    }
+
+    /**
+     * 清空持久化与内存中的声纹画像（例如用户主动「重置说话人」时调用）。
+     * 同时清空当前声纹模型对应的命名映射，避免名字与画像错位。
+     */
+    fun clearProfiles() {
+        speakerProfiles.clear()
+        lastSpeakerId = null
+        SpeakerNameStore.clear()
+        try {
+            if (profilesFile.exists()) profilesFile.delete()
+            Log.i(TAG, "[V2_DIARIZATION] Speaker profiles cleared.")
+        } catch (e: Exception) {
+            Log.e(TAG, "[V2_DIARIZATION] Failed to delete profiles file: ${e.message}", e)
+        }
     }
 
     private fun calculateCosineSimilarity(vectorA: FloatArray, vectorB: FloatArray): Float {

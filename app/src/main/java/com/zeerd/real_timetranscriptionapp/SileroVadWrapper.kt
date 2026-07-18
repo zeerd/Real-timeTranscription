@@ -18,14 +18,14 @@ class SileroVadWrapper(context: Context) {
     private val stateShape = longArrayOf(2, 1, 64)
 
     init {
-        Log.d(TAG, "Initializing SileroVadWrapper (v4 mode)...")
+        Log.i(TAG, "[V2_VAD] Initializing SileroVadWrapper (v4 mode)...")
         try {
             val modelBytes = context.assets.open("silero_vad.onnx").readBytes()
             session = env.createSession(modelBytes)
-            Log.d(TAG, "ONNX Session created successfully. Inputs: ${session.inputNames}, Outputs: ${session.outputNames}")
+            Log.i(TAG, "[V2_VAD] ONNX Session created. Inputs: ${session.inputNames}")
             reset()
         } catch (e: Exception) {
-            Log.e(TAG, "[FATAL_ERROR] Failed to initialize Silero VAD: ${e.message}", e)
+            Log.e(TAG, "[V2_VAD] [FATAL_ERROR] Failed to initialize: ${e.message}", e)
             throw e
         }
     }
@@ -38,8 +38,6 @@ class SileroVadWrapper(context: Context) {
             val hTensor = OnnxTensor.createTensor(env, hState, stateShape)
             val cTensor = OnnxTensor.createTensor(env, cState, stateShape)
             
-            // Map inputs based on the model's expectation: x, h, c
-            // Some versions also need 'sr', but your error message only listed [x, h, c]
             val inputs = mutableMapOf(
                 "x" to inputTensor,
                 "h" to hTensor,
@@ -51,7 +49,6 @@ class SileroVadWrapper(context: Context) {
             }
 
             session.run(inputs).use { results ->
-                // Results order: output, hn, cn
                 val outputTensor = results[0] as OnnxTensor
                 val probability = outputTensor.floatBuffer.get(0)
                 
@@ -69,7 +66,7 @@ class SileroVadWrapper(context: Context) {
                 probability
             }
         } catch (e: Exception) {
-            Log.e(TAG, "VAD Inference error: ${e.message}")
+            Log.e(TAG, "[V2_VAD] Inference error: ${e.message}")
             0f
         }
     }

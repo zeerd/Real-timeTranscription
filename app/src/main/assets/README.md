@@ -47,6 +47,12 @@ If you already have the models, you can place them manually in the app's private
 #### Whisper Small (Multilingual)
 [sherpa-onnx-whisper-small.tar.bz2](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-small.tar.bz2)
 
+### 3. Speaker Diarization
+
+https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models
+
+
+
 ## Architecture
 - **VAD**: Silero VAD (v4)
 - **ASR**: Sherpa-ONNX with Whisper (Quantized)

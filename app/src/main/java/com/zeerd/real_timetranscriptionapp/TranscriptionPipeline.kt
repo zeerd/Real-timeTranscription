@@ -9,10 +9,16 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.util.LinkedList
 
+data class AudioTextPair(
+    val rawAudio: FloatArray,
+    val transcribedText: String
+)
+
 class TranscriptionPipeline(
     private val audioChannel: Channel<ByteArray>,
     private val vadWrapper: SileroVadWrapper,
-    private val transcriptionChannel: Channel<FloatArray>
+    private val whisperWrapper: WhisperWrapper,
+    private val resultChannel: Channel<AudioTextPair>
 ) {
     private val TAG = "TranscriptionPipeline"
     private val _vadState = MutableStateFlow(VadState.IDLE)
@@ -43,7 +49,7 @@ class TranscriptionPipeline(
                         }
 
                         if (isSpeech) {
-                            Log.d(TAG, "Speech detected (prob: $probability), transition IDLE -> RECORDING")
+                            Log.i(TAG, "[V2_PIPELINE] Speech detection trigger (prob: ${String.format("%.3f", probability)}), transition IDLE -> RECORDING")
                             _vadState.value = VadState.RECORDING
                             
                             // 1. Prepend pre-roll buffer
@@ -72,8 +78,10 @@ class TranscriptionPipeline(
                             val reason = if (shouldCutNatural) "natural silence" else "max duration"
                             
                             if (speechBuffer.size >= Constants.MIN_SPEECH_DURATION_SAMPLES) {
-                                Log.d(TAG, "Cut triggered by $reason. Samples: ${speechBuffer.size}. Sending to transcription.")
-                                transcriptionChannel.send(speechBuffer.toFloatArray())
+                                Log.d(TAG, "Cut triggered by $reason. Samples: ${speechBuffer.size}. Transcribing and sending.")
+                                val audioData = speechBuffer.toFloatArray()
+                                val text = whisperWrapper.transcribe(audioData)
+                                resultChannel.send(AudioTextPair(audioData, text))
                             } else {
                                 Log.d(TAG, "Cut triggered by $reason, but segment too short (${speechBuffer.size} samples). Discarding.")
                             }

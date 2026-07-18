@@ -19,6 +19,7 @@ import java.io.FileOutputStream
 import java.io.FilterInputStream
 import java.io.InputStream
 import java.util.Collections
+import java.util.Locale
 
 data class ModelInfo(
     val id: String,
@@ -45,7 +46,9 @@ class ModelManager(private val context: Context) {
     private val activeDownloads = mutableMapOf<String, Long>()
     private val extractingModels = Collections.synchronizedSet(mutableSetOf<String>())
 
-    val availableModels = listOf(
+    private val _customModels = MutableStateFlow<List<ModelInfo>>(emptyList())
+
+    private val staticModels = listOf(
         ModelInfo(
             id = "vad-silero",
             name = "Silero VAD",
@@ -81,8 +84,32 @@ class ModelManager(private val context: Context) {
             decoderUrl = "",
             tokensUrl = "",
             sizeLabel = "~960MB"
+        ),
+        ModelInfo(
+            id = "speaker-ecapa",
+            name = "ECAPA-TDNN Speaker Embedding",
+            description = "Identifies different speakers based on voiceprints.",
+            encoderUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
+            decoderUrl = "",
+            tokensUrl = "",
+            sizeLabel = "~20MB"
+        ),
+        ModelInfo(
+            id = "llm-gemma-2b",
+            name = "Gemma 2B (LiteRT)",
+            description = "Google LiteRT LM for semantic paragraphing and formatting.",
+            encoderUrl = "https://huggingface.co/google/gemma-2b-it-tflite/resolve/main/gemma-2b-it-cpu-int8.tflite", // Example URL
+            decoderUrl = "",
+            tokensUrl = "",
+            sizeLabel = "~1.4GB"
         )
     )
+
+    val availableModels: List<ModelInfo>
+        get() = staticModels + _customModels.value
+
+    // 添加一个 Flow 以便 UI 观察模型列表的变化
+    val customModels = _customModels.asStateFlow()
 
     private val _modelStatuses = MutableStateFlow<Map<String, ModelStatus>>(emptyMap())
     val modelStatuses = _modelStatuses.asStateFlow()
@@ -92,15 +119,76 @@ class ModelManager(private val context: Context) {
 
     init {
         if (!rootDir.exists()) rootDir.mkdirs()
+        discoverCustomModels()
         // 系统性修复：启动时检查是否有已下载但未解压的 tar.bz2 文件，自动触发解压流程
         checkPendingDownloads()
         refreshStatuses()
+    }
+
+    private fun discoverCustomModels() {
+        val custom = rootDir.listFiles()?.filter { it.isDirectory && it.name.startsWith("custom-") }?.map { dir ->
+            val isLlm = dir.listFiles()?.any { it.name.endsWith(".tflite") || it.name.endsWith(".bin") || it.name.endsWith(".litertlm") } ?: false
+            val isSpeaker = dir.name.startsWith("custom-speaker-")
+            ModelInfo(
+                id = dir.name,
+                name = dir.name.removePrefix("custom-").replace("-", " ").replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.ROOT) else it.toString() },
+                description = when {
+                    isLlm -> "Custom LLM model imported by user."
+                    isSpeaker -> "Custom speaker diarization model imported by user."
+                    else -> "Custom ASR model imported by user."
+                },
+                encoderUrl = "",
+                decoderUrl = "",
+                tokensUrl = "",
+                sizeLabel = formatSize(computeDirectorySize(dir))
+            )
+        } ?: emptyList()
+        _customModels.value = custom
+        Log.i(TAG, "[DISCOVER] custom models found: ${custom.map { it.id }}")
+    }
+
+    // 递归计算目录（含子目录）中所有文件的总字节数
+    private fun computeDirectorySize(dir: File): Long {
+        if (!dir.exists()) return 0L
+        if (dir.isFile) return dir.length()
+        return dir.listFiles()?.sumOf { computeDirectorySize(it) } ?: 0L
+    }
+
+    // 将字节数格式化为人类可读的字符串（如 1.4GB / 290MB / 600KB）
+    private fun formatSize(bytes: Long): String {
+        if (bytes <= 0L) return "Local"
+        val kb = 1024L
+        val mb = kb * 1024L
+        val gb = mb * 1024L
+        return when {
+            bytes >= gb -> String.format(Locale.ROOT, "%.1fGB", bytes.toDouble() / gb)
+            bytes >= mb -> String.format(Locale.ROOT, "%.0fMB", bytes.toDouble() / mb)
+            bytes >= kb -> String.format(Locale.ROOT, "%.0fKB", bytes.toDouble() / kb)
+            else -> "${bytes}B"
+        }
     }
 
     private fun checkPendingDownloads() {
         val downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
         availableModels.forEach { model ->
             if (model.id == "vad-silero") return@forEach
+            if (model.id.startsWith("llm")) {
+                val modelFile = File(downloadDir, "${model.id}.tflite")
+                if (modelFile.exists() && !isModelReady(model.id)) {
+                    Log.i(TAG, "Found pending LLM model for ${model.id}, triggering move...")
+                    scope.launch { handleDownloadComplete(model.id) }
+                }
+                return@forEach
+            }
+            if (isSingleFileModel(model)) {
+                val fileName = model.encoderUrl.substringAfterLast("/")
+                val file = File(downloadDir, fileName)
+                if (file.exists() && !isModelReady(model.id)) {
+                    Log.i(TAG, "Found pending single-file model for ${model.id}, triggering copy...")
+                    scope.launch { handleDownloadComplete(model.id) }
+                }
+                return@forEach
+            }
             val archive = File(downloadDir, "${model.id}.tar.bz2")
             if (archive.exists() && !isModelReady(model.id)) {
                 Log.i(TAG, "Found pending archive for ${model.id}, triggering extraction...")
@@ -137,7 +225,27 @@ class ModelManager(private val context: Context) {
             if (fileInFiles.exists()) return true
             return try { context.assets.open("silero_vad.onnx").close(); true } catch (e: Exception) { false }
         }
+        
         val modelDir = File(rootDir, modelId)
+        
+        // 特殊处理 LLM 模型：支持 .bin, .litertlm 或 .tflite
+        if (modelId.contains("llm")) {
+            val modelFile = modelDir.listFiles()?.find { 
+                it.name.endsWith(".bin") || it.name.endsWith(".litertlm") || it.name.endsWith(".tflite")
+            }
+            return modelFile != null && modelFile.length() > 10 * 1024 * 1024 // 至少 10MB，自定义模型可能较小
+        }
+
+        // 特殊处理单文件模型（如说话人 ECAPA .onnx）：检查目录内是否存在 .onnx 文件
+        // 注意排除 whisper 模型（其目录也含 .onnx，但需走下面的 encoder/decoder/tokens 校验）
+        val isWhisper = setOf("tiny", "base", "small").any { modelId.contains(it) }
+        if (!isWhisper && (modelId == "speaker-ecapa" || modelDir.listFiles()?.any { it.name.endsWith(".onnx") } == true)) {
+            val onnxFile = modelDir.listFiles()?.find { it.name.endsWith(".onnx") }
+            val ready = onnxFile != null && onnxFile.length() > 1024 * 1024 // 至少 1MB
+            Log.d(TAG, "[isModelReady] Speaker/onnx model '$modelId': onnxFile=${onnxFile?.absolutePath}, size=${onnxFile?.length()}, ready=$ready")
+            return ready
+        }
+
         val prefix = if (modelId.contains("tiny")) "tiny" else if (modelId.contains("base")) "base" else "small"
         
         val encoder = File(modelDir, "$prefix-encoder.int8.onnx")
@@ -150,9 +258,24 @@ class ModelManager(private val context: Context) {
                tokens.exists() && tokens.length() > 10
     }
     
+    // 判断模型是否为单文件下载（如说话人模型是单个 .onnx，而非 tar.bz2 压缩包）
+    private fun isSingleFileModel(model: ModelInfo): Boolean {
+        return model.encoderUrl.endsWith(".onnx", ignoreCase = true)
+    }
+
+    // 根据模型信息计算下载目录中的文件名
+    private fun getDownloadFileName(model: ModelInfo): String {
+        return when {
+            model.id == "vad-silero" -> "silero_vad.onnx"
+            model.id.startsWith("llm") -> "${model.id}.tflite"
+            isSingleFileModel(model) -> model.encoderUrl.substringAfterLast("/")
+            else -> "${model.id}.tar.bz2"
+        }
+    }
+
     fun downloadModel(model: ModelInfo) {
         Log.d(TAG, "Starting download for ${model.name}...")
-        val fileName = if (model.id == "vad-silero") "silero_vad.onnx" else "${model.id}.tar.bz2"
+        val fileName = getDownloadFileName(model)
         val request = DownloadManager.Request(Uri.parse(model.encoderUrl))
             .setTitle("Downloading ${model.name}")
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
@@ -212,6 +335,34 @@ class ModelManager(private val context: Context) {
                 }
             }
             refreshStatuses()
+        } else if (isSingleFileModel(availableModels.firstOrNull { it.id == modelId } ?: return)) {
+            // 单文件模型（如说话人 .onnx）：直接拷贝到模型目录，保留原始文件名
+            val fileName = getDownloadFileName(availableModels.first { it.id == modelId })
+            val src = File(downloadDir, fileName)
+            val modelDir = getModelDir(modelId)
+            if (!modelDir.exists()) modelDir.mkdirs()
+            val dest = File(modelDir, fileName)
+            withContext(Dispatchers.IO) {
+                if (src.exists()) {
+                    src.copyTo(dest, overwrite = true)
+                    src.delete()
+                    Log.d(TAG, "Single-file model copied to ${dest.absolutePath}")
+                }
+            }
+            refreshStatuses()
+        } else if (modelId.startsWith("llm")) {
+            val src = File(downloadDir, "$modelId.tflite")
+            val modelDir = getModelDir(modelId)
+            if (!modelDir.exists()) modelDir.mkdirs()
+            val dest = File(modelDir, "$modelId.tflite")
+            withContext(Dispatchers.IO) {
+                if (src.exists()) {
+                    src.copyTo(dest, overwrite = true)
+                    src.delete()
+                    Log.d(TAG, "LLM model moved to ${dest.absolutePath}")
+                }
+            }
+            refreshStatuses()
         } else {
             val archive = File(downloadDir, "$modelId.tar.bz2")
             if (archive.exists()) {
@@ -240,6 +391,56 @@ class ModelManager(private val context: Context) {
             withContext(Dispatchers.Main) { _modelStatuses.update { it + (modelId to ModelStatus.ERROR) } }
         } finally {
             tempFile.delete()
+        }
+    }
+
+    // 导入单文件模型（如说话人 ECAPA .onnx）：生成独立的 custom-speaker-<name> 目录，
+    // 使其作为独立信息块出现在设置页的 Speaker Diarization 分区
+    suspend fun importSingleFileModel(uri: Uri, originalFileName: String) = withContext(Dispatchers.IO) {
+        val baseName = originalFileName.substringBeforeLast(".")
+        val modelId = "custom-speaker-${baseName.lowercase().replace(" ", "-")}"
+        val modelDir = getModelDir(modelId)
+        if (!modelDir.exists()) modelDir.mkdirs()
+        val destFile = File(modelDir, originalFileName)
+        Log.i(TAG, "[IMPORT_SPEAKER] uri=$uri fileName=$originalFileName -> modelId=$modelId dest=${destFile.absolutePath}")
+
+        _modelStatuses.update { it + (modelId to ModelStatus.EXTRACTING(-1f)) }
+
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(destFile).use { output -> input.copyTo(output) }
+            }
+            Log.i(TAG, "[IMPORT_SPEAKER] Success: ${destFile.absolutePath} (${destFile.length()} bytes)")
+            discoverCustomModels()
+        } catch (e: Exception) {
+            Log.e(TAG, "[IMPORT_SPEAKER] Failed to import speaker model", e)
+            _modelStatuses.update { it + (modelId to ModelStatus.ERROR) }
+        } finally {
+            refreshStatuses()
+        }
+    }
+
+    suspend fun importLiteRtModel(uri: Uri, originalFileName: String) = withContext(Dispatchers.IO) {
+        val baseName = originalFileName.substringBeforeLast(".")
+        val modelId = "custom-llm-${baseName.lowercase().replace(" ", "-")}"
+        val modelDir = File(rootDir, modelId)
+        if (!modelDir.exists()) modelDir.mkdirs()
+        
+        val destFile = File(modelDir, originalFileName)
+        
+        _modelStatuses.update { it + (modelId to ModelStatus.EXTRACTING(-1f)) }
+        
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(destFile).use { output -> input.copyTo(output) }
+            }
+            Log.d(TAG, "LiteRT model imported successfully to ${destFile.absolutePath}")
+            discoverCustomModels()
+        } catch (e: Exception) {
+            Log.e(TAG, "LiteRT model Import failed", e)
+            _modelStatuses.update { it + (modelId to ModelStatus.ERROR) }
+        } finally {
+            refreshStatuses()
         }
     }
 
@@ -393,6 +594,13 @@ class ModelManager(private val context: Context) {
         if (modelDir.exists()) {
             modelDir.deleteRecursively()
             Log.i(TAG, "Model $modelId deleted.")
+            if (modelId.startsWith("custom-")) {
+                discoverCustomModels()
+            }
+            // 若删除的是当前选中的说话人模型，清除偏好
+            if (getSelectedSpeakerModelId() == modelId) {
+                setSelectedSpeakerModelId("")
+            }
             refreshStatuses()
         }
     }
@@ -400,6 +608,24 @@ class ModelManager(private val context: Context) {
     fun setSelectedModelId(modelId: String) {
         Log.i(TAG, "Setting selected model to: $modelId")
         context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putString("selected_model", modelId).apply()
+        _settingsChanged.update { it + 1 }
+    }
+
+    fun getSelectedLlmModelId(): String = context.getSharedPreferences("settings", Context.MODE_PRIVATE).getString("selected_llm_model", "llm-gemma-2b") ?: "llm-gemma-2b"
+    fun setSelectedLlmModelId(modelId: String) {
+        Log.i(TAG, "Setting selected LLM model to: $modelId")
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putString("selected_llm_model", modelId).apply()
+        _settingsChanged.update { it + 1 }
+    }
+
+    fun getSelectedSpeakerModelId(): String {
+        val id = context.getSharedPreferences("settings", Context.MODE_PRIVATE).getString("selected_speaker_model", "") ?: ""
+        Log.d(TAG, "[SPEAKER_SELECT] getSelectedSpeakerModelId=$id")
+        return id
+    }
+    fun setSelectedSpeakerModelId(modelId: String) {
+        Log.i(TAG, "[SPEAKER_SELECT] Setting selected speaker model to: $modelId")
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putString("selected_speaker_model", modelId).apply()
         _settingsChanged.update { it + 1 }
     }
 

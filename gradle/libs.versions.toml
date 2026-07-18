@@ -7,11 +7,15 @@ espressoCore = "3.7.0"
 lifecycleRuntimeKtx = "2.10.0"
 activityCompose = "1.13.0"
 kotlin = "2.2.10"
+coroutines = "1.11.0"
 composeBom = "2026.02.01"
 onnxruntime = "1.27.0"
 onnxext = "0.13.0"
 sherpa = "v1.13.4"
 commons-compress = "1.26.1"
+litert = "0.14.0"
+litert-core = "1.4.2"
+litert-gpu = "1.4.2"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -23,6 +27,11 @@ junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycleRuntimeKtx" }
+litertlm = { group = "com.google.ai.edge.litertlm", name = "litertlm-android", version.ref = "litert" }
+litert-core = { group = "com.google.ai.edge.litert", name = "litert", version.ref = "litert-core" }
+litert-gpu = { group = "com.google.ai.edge.litert", name = "litert-gpu", version.ref = "litert-gpu" }
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
 androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version = "2.8.5" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }

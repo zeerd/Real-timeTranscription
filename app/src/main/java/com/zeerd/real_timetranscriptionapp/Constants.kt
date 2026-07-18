@@ -15,4 +15,9 @@ object Constants {
     
     const val PRE_SPEECH_BUFFER_FRAMES = 10 // Pre-roll: ~320ms of audio before detection
     const val MIN_SPEECH_DURATION_SAMPLES = 16000 * 0.5 // 0.5 seconds minimum to be valid
+
+    const val DIARIZATION_SIMILARITY_THRESHOLD = 0.5f
+    // 过短的片段 embedding 不可靠，低于此时长直接沿用上一位说话人，避免误判为新说话人
+    const val MIN_DIARIZATION_SAMPLES = 16000 // 1 秒 @16kHz
+    const val SEMANTIC_BUFFER_TRIGGER_COUNT = 4
 }

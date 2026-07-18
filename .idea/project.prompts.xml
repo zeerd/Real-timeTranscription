@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="PromptTemplates">
+    <option name="prompts">
+      <list>
+        <PromptTemplate>
+          <option name="enabled" value="true" />
+          <option name="name" value="通用规则" />
+          <option name="text" value="请严格遵守`.github/instructions`下的所有md文件内的要求。" />
+        </PromptTemplate>
+      </list>
+    </option>
+  </component>
+</project>

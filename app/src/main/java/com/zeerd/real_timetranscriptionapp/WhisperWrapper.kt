@@ -65,9 +65,9 @@ class WhisperWrapper(context: Context, modelId: String, modelDir: File) {
         
         try {
             recognizer = OfflineRecognizer(null, config)
-            Log.d(TAG, "OfflineRecognizer initialized successfully")
+            Log.i(TAG, "[V2_ASR] OfflineRecognizer initialized successfully for $modelId")
         } catch (e: Exception) {
-            Log.e(TAG, "[FATAL_ERROR] Failed to initialize OfflineRecognizer: ${e.message}", e)
+            Log.e(TAG, "[V2_ASR] [FATAL_ERROR] Failed to initialize: ${e.message}", e)
             throw e
         }
     }
@@ -94,7 +94,8 @@ class WhisperWrapper(context: Context, modelId: String, modelDir: File) {
     }
 
     fun transcribe(audioData: FloatArray): String {
-        Log.d(TAG, "Transcribing ${audioData.size} samples...")
+        Log.d(TAG, "[V2_ASR] Transcribing ${audioData.size} samples (${audioData.size / 16000f}s)...")
+        val startTime = System.currentTimeMillis()
         return try {
             val sample = recognizer.createStream()
             // Force Simplified Chinese using initial prompt
@@ -103,10 +104,11 @@ class WhisperWrapper(context: Context, modelId: String, modelDir: File) {
             sample.acceptWaveform(audioData, 16000)
             recognizer.decode(sample)
             val result = recognizer.getResult(sample)
-            Log.d(TAG, "Transcription result: ${result.text}")
+            val duration = System.currentTimeMillis() - startTime
+            Log.i(TAG, "[V2_ASR] Result (${duration}ms): \"${result.text.trim()}\"")
             result.text.trim()
         } catch (e: Exception) {
-            Log.e(TAG, "Transcription error: ${e.message}", e)
+            Log.e(TAG, "[V2_ASR] Transcription error: ${e.message}", e)
             "Error: ${e.message}"
         }
     }

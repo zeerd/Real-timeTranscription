@@ -14,7 +14,14 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
+        android:extractNativeLibs="true"
         android:theme="@style/Theme.RealtimeTranscriptionApp">
+
+        <!-- 对 Android 12+ 设备，显式请求加载 vendor 层的 OpenCL 库 -->
+        <uses-native-library
+            android:name="libOpenCL.so"
+            android:required="false" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

@@ -41,15 +41,19 @@ import java.io.File
 class MainActivity : ComponentActivity() {
     private val TAG = "MainActivity"
     private val transcriptions = mutableStateListOf<String>()
+    private val regularizedTranscriptions = mutableStateListOf<String>()
     private val isRecording = mutableStateOf(false)
     private val volumeLevel = mutableStateOf(0f)
     private val saveLocationDescription = mutableStateOf("")
     
     private val audioChannel = Channel<ByteArray>(100)
-    private val transcriptionChannel = Channel<FloatArray>(Channel.CONFLATED)
+    private val transcriptionChannel = Channel<AudioTextPair>(Channel.CONFLATED)
     
     private var whisperWrapper: WhisperWrapper? = null
-    private var vadWrapper: SileroVadWrapper? = null // 系统性修复：显式持有 VAD 引用以便释放
+    private var vadWrapper: SileroVadWrapper? = null
+    private var diarizationManager: SpeakerDiarizationManager? = null
+    private var llmManager: LocalLlmManager? = null
+    private val semanticBuffer = SemanticBuffer()
     private var currentModelId: String? = null
     private var pipelineJob: Job? = null
     private lateinit var fileManager: TranscriptionFileManager
@@ -87,26 +91,31 @@ class MainActivity : ComponentActivity() {
                             contract = ActivityResultContracts.CreateDocument("text/plain")
                         ) { uri ->
                             if (uri != null) {
+                                Log.d(TAG, "[USER_ACTION] User selected a save file via picker: $uri")
                                 lifecycleScope.launch {
                                     fileManager.setUserSelectedUri(uri)
                                     saveLocationDescription.value = fileManager.getCurrentSaveLocation()
                                     Log.d(TAG, "User selected save file: $uri")
                                 }
-                            }
-                        }
+                            } else {
+                                Log.d(TAG, "[USER_ACTION] User cancelled save-file picker (no URI returned)")
 
                         Scaffold(
                             modifier = Modifier.fillMaxSize(),
                             floatingActionButton = {
                                 Column(horizontalAlignment = Alignment.End) {
                                     FloatingActionButton(
-                                        onClick = { navController.navigate("settings") },
+                                        onClick = {
+                                            Log.d(TAG, "[USER_ACTION] Navigating to Settings screen")
+                                            navController.navigate("settings")
+                                        },
                                         containerColor = MaterialTheme.colorScheme.secondaryContainer
                                     ) {
                                         Icon(Icons.Default.Settings, contentDescription = "Settings")
                                     }
                                     Spacer(modifier = Modifier.height(16.dp))
                                     FloatingActionButton(onClick = {
+                                        Log.d(TAG, "[USER_ACTION] Opening save-file picker")
                                         createDocumentLauncher.launch("transcription_${System.currentTimeMillis()}.txt")
                                     }) {
                                         Icon(Icons.Default.Save, contentDescription = "Set Save File")
@@ -116,6 +125,7 @@ class MainActivity : ComponentActivity() {
                         ) { innerPadding ->
                             TranscriptionScreen(
                                 transcriptions = transcriptions,
+                                regularizedTranscriptions = regularizedTranscriptions,
                                 isRecording = isRecording.value,
                                 volumeLevel = volumeLevel.value,
                                 saveLocation = saveLocationDescription.value,
@@ -127,6 +137,7 @@ class MainActivity : ComponentActivity() {
                         SettingsScreen(
                             modelManager = modelManager,
                             onBack = { 
+                                Log.d(TAG, "[USER_ACTION] Returning from Settings screen")
                                 navController.popBackStack()
                                 // 移除这里的 startAudioPipeline()，由下方的 collect 统一处理
                             }
@@ -140,7 +151,6 @@ class MainActivity : ComponentActivity() {
 
         // 统一的状态观察器：这是启动/重启录音管道的唯一入口
         lifecycleScope.launch {
-            // 合并所有可能触发重启的信号
             launch {
                 modelManager.settingsChanged.collect {
                     Log.i(TAG, "Settings change signal received (#$it)")
@@ -152,10 +162,17 @@ class MainActivity : ComponentActivity() {
                     checkAndStartPipeline()
                 }
             }
+            launch {
+                semanticBuffer.bufferFullFlow.collect { turns ->
+                    Log.i(TAG, "[V2_PIPELINE] Buffer full (${turns.size} turns), sending to LLM")
+                    llmManager?.enqueueRegularization(turns)
+                }
+            }
         }
     }
 
     private var currentAudioSource: Int? = null
+    private var isPipelineStarting = false
 
     private fun getAudioSourceName(source: Int?): String {
         return when (source) {
@@ -170,21 +187,24 @@ class MainActivity : ComponentActivity() {
 
     private fun checkAndStartPipeline() {
         val selectedId = modelManager.getSelectedModelId()
+        val selectedLlmId = modelManager.getSelectedLlmModelId()
         val selectedAudioSource = modelManager.getAudioSource()
         val isReady = modelManager.isModelReady(selectedId)
         
         // 使用 Info 级别日志，并显示易读的字符串名称
-        Log.i(TAG, "Pipeline Sync Check: model=$selectedId, audioSource=${getAudioSourceName(selectedAudioSource)}, ready=$isReady, runningModel=$currentModelId, runningSource=${getAudioSourceName(currentAudioSource)}")
+        Log.i(TAG, "Pipeline Sync Check: whisper=$selectedId, llm=$selectedLlmId, audioSource=${getAudioSourceName(selectedAudioSource)}, runningModel=$currentModelId, starting=$isPipelineStarting")
 
         if (isReady) {
             if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                // 如果发现音源或者模型变了，就重启
+                // 如果发现音源或者模型变了，就重启 (这里简单比较 whisper 模型，LLM 可以在运行中切换或重启)
                 if (currentModelId != selectedId || currentAudioSource != selectedAudioSource) {
-                    Log.i(TAG, "Change detected (Source: ${getAudioSourceName(currentAudioSource)} -> ${getAudioSourceName(selectedAudioSource)}). Restarting pipeline...")
+                    if (isPipelineStarting) {
+                        Log.w(TAG, "Pipeline is already starting, skipping duplicate call")
+                        return
+                    }
+                    Log.i(TAG, "Change detected. Restarting pipeline...")
                     startAudioPipeline()
                 }
-            } else {
-                Log.w(TAG, "Recording permission not granted, cannot start pipeline")
             }
         }
     }
@@ -207,6 +227,9 @@ class MainActivity : ComponentActivity() {
         
         Log.i(TAG, ">>> RESTARTING AUDIO PIPELINE with model: $modelId")
         
+        // 立即标记正在启动，防止 checkAndStartPipeline 重复调用
+        isPipelineStarting = true
+        
         pipelineJob?.cancel()
         pipelineJob = lifecycleScope.launch {
             // 系统性修复：严格管理 Native 资源释放
@@ -215,6 +238,10 @@ class MainActivity : ComponentActivity() {
             whisperWrapper = null
             vadWrapper?.close()
             vadWrapper = null
+            diarizationManager?.release()
+            diarizationManager = null
+            llmManager?.release()
+            llmManager = null
             currentModelId = null
             currentAudioSource = null
             
@@ -229,6 +256,39 @@ class MainActivity : ComponentActivity() {
                     val vad = SileroVadWrapper(this@MainActivity)
                     val whisper = WhisperWrapper(this@MainActivity, modelId, modelDir)
                     
+                    // Initialize Diarization and LLM if their models are ready
+                    // 使用用户在设置中选中的说话人模型（未选中则回退到任意就绪的说话人模型）
+                    val selectedSpeakerId = modelManager.getSelectedSpeakerModelId()
+                    Log.i(TAG, "[V2_PIPELINE] selectedSpeakerId='$selectedSpeakerId'")
+                    val speakerModelsRoot = modelManager.getModelDir("")
+                    val candidateDirs = if (selectedSpeakerId.isNotEmpty()) {
+                        listOf(modelManager.getModelDir(selectedSpeakerId))
+                    } else {
+                        speakerModelsRoot.listFiles()
+                            ?.filter { it.isDirectory && (it.name == "speaker-ecapa" || it.name.startsWith("custom-speaker-")) }
+                            ?: emptyList()
+                    }
+                    Log.i(TAG, "[V2_PIPELINE] speaker candidate dirs: ${candidateDirs.map { it.absolutePath }}")
+                    val speakerModel = candidateDirs
+                        .mapNotNull { dir -> dir.listFiles()?.find { f -> f.name.endsWith(".onnx") } }
+                        .firstOrNull { it.exists() }
+                    if (speakerModel != null) {
+                        Log.i(TAG, "[V2_PIPELINE] Speaker model found: ${speakerModel.absolutePath}, enabling Diarization")
+                        diarizationManager = SpeakerDiarizationManager(this@MainActivity, speakerModel.absolutePath)
+                    } else {
+                        Log.w(TAG, "[V2_PIPELINE] Speaker model NOT found. Diarization disabled.")
+                    }
+                    
+                    val selectedLlmId = modelManager.getSelectedLlmModelId()
+                    val llmModelDir = modelManager.getModelDir(selectedLlmId)
+                    if (modelManager.isModelReady(selectedLlmId)) {
+                        Log.i(TAG, "[V2_PIPELINE] LLM model $selectedLlmId is ready, enabling Regularization")
+                        val manager = LocalLlmManager(this@MainActivity, llmModelDir)
+                        llmManager = manager
+                    } else {
+                        Log.w(TAG, "[V2_PIPELINE] LLM model $selectedLlmId is NOT ready. Regularization disabled.")
+                    }
+
                     // 赋值给成员变量以便管理
                     vadWrapper = vad
                     whisperWrapper = whisper
@@ -244,13 +304,28 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            // 在 withContext 外部启动 LLM regularizedBlocks 的收集，
+            // 避免 withContext 被永不结束的 collect 阻塞
+            llmManager?.let { mgr ->
+                launch(Dispatchers.Main) {
+                    mgr.regularizedBlocks.collect { text ->
+                        if (text.isNotBlank()) {
+                            regularizedTranscriptions.add(0, text)
+                            Log.i(TAG, "[V2_UI] New regularized block added to UI")
+                        }
+                    }
+                }
+            }
+
             if (initialized != null) {
                 val (vad, whisper) = initialized
                 Log.i(TAG, "Pipeline started successfully with $modelId")
+                // 初始化成功，重置启动标记
+                isPipelineStarting = false
 
                 val audioSource = modelManager.getAudioSource()
                 val recorder = AudioRecorder(audioChannel, audioSource)
-                val pipeline = TranscriptionPipeline(audioChannel, vad, transcriptionChannel)
+                val pipeline = TranscriptionPipeline(audioChannel, vad, whisper, transcriptionChannel)
 
                 launch {
                     pipeline.vadState.collect { state ->
@@ -271,35 +346,38 @@ class MainActivity : ComponentActivity() {
 
                 launch {
                     Log.d(TAG, "Launching Transcription results loop")
-                    for (speech in transcriptionChannel) {
-                        Log.d(TAG, "Received speech segment (${speech.size} samples), calling Whisper...")
+                    for (pair in transcriptionChannel) {
+                        Log.d(TAG, "Received AudioTextPair (${pair.rawAudio.size} samples)")
                         
-                        // Use a local copy to avoid UI updates inside withContext if possible
-                        // But we want to show "Transcribing..." status
-                        withContext(Dispatchers.Main) {
-                            transcriptions.add(0, "Transcribing...")
-                        }
-
-                        val result = withContext(Dispatchers.Default) {
-                            whisper.transcribe(speech)
-                        }
+                        val result = pair.transcribedText
                         
                         withContext(Dispatchers.Main) {
-                            if (transcriptions.isNotEmpty() && transcriptions[0] == "Transcribing...") {
-                                transcriptions.removeAt(0)
-                            }
                             if (result.isNotBlank()) {
-                                transcriptions.add(0, result)
-                                Log.d(TAG, "[UI_MSG] Transcription added: $result")
+                                val speakerId = withContext(Dispatchers.Default) {
+                                    val id = diarizationManager?.identifySpeaker(pair.rawAudio) ?: "Speaker"
+                                    Log.i(TAG, "[V2_PIPELINE] Segment diarization completed. Result: $id")
+                                    id
+                                }
                                 
+                                val displayResult = "[$speakerId]: $result"
+                                transcriptions.add(0, displayResult)
+                                Log.d(TAG, "[UI_MSG] Transcription added: $displayResult")
+                                
+                                // Add to semantic buffer for LLM regularization
+                                semanticBuffer.addTurn(RawSpeakerTurn(speakerId, System.currentTimeMillis(), result))
+
                                 // Auto-save to file (IO bound)
                                 launch(Dispatchers.IO) {
-                                    fileManager.saveTranscription(result)
+                                    fileManager.saveTranscription(displayResult)
                                 }
                             }
                         }
                     }
                 }
+            } else {
+                // 初始化失败，重置启动标记以便后续重试
+                Log.e(TAG, "Pipeline initialization returned null, resetting start flag")
+                isPipelineStarting = false
             }
         }
     }
@@ -308,24 +386,48 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         Log.d(TAG, "onDestroy, closing resources")
         whisperWrapper?.close()
+        diarizationManager?.release()
+        llmManager?.release()
     }
 }
 
 @Composable
 fun TranscriptionScreen(
     transcriptions: List<String>,
+    regularizedTranscriptions: List<String>,
     isRecording: Boolean,
     volumeLevel: Float,
     saveLocation: String,
     modifier: Modifier = Modifier
 ) {
+    var selectedTab by remember { mutableIntStateOf(1) }
+    val tabs = listOf("实时流 (Raw)", "正式稿 (Formal)")
+
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
-        Text(
-            text = "Real-time Transcription (Local)",
-            style = MaterialTheme.typography.headlineMedium,
-            modifier = Modifier.padding(bottom = 8.dp)
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Real-time Transcription",
+                style = MaterialTheme.typography.headlineSmall
+            )
+        }
         
+        SecondaryTabRow(selectedTabIndex = selectedTab, modifier = Modifier.padding(vertical = 8.dp)) {
+            tabs.forEachIndexed { index, title ->
+                Tab(
+                    selected = selectedTab == index,
+                    onClick = {
+                        Log.d(TAG, "[USER_ACTION] Switched tab to '$title' (index=$index)")
+                        selectedTab = index
+                    },
+                    text = { Text(title) }
+                )
+            }
+        }
+
         Card(
             modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
@@ -348,14 +450,17 @@ fun TranscriptionScreen(
         
         Spacer(modifier = Modifier.height(16.dp))
         
-        Text(text = "Transcripts:", style = MaterialTheme.typography.titleMedium)
+        val currentList = if (selectedTab == 0) transcriptions else regularizedTranscriptions
         
         LazyColumn(modifier = Modifier.weight(1f)) {
-            items(transcriptions) { text ->
+            items(currentList) { text ->
                 SelectionContainer {
                     Card(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (selectedTab == 1) MaterialTheme.colorScheme.primaryContainer 
+                                             else MaterialTheme.colorScheme.surfaceVariant
+                        )
                     ) {
                         Text(text = text, modifier = Modifier.padding(12.dp))
                     }
@@ -363,9 +468,12 @@ fun TranscriptionScreen(
             }
         }
         
-        if (transcriptions.isEmpty()) {
+        if (currentList.isEmpty()) {
             Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                Text(text = "Speak to start capturing...", color = Color.Gray)
+                Text(
+                    text = if (selectedTab == 0) "Speak to start capturing..." else "Waiting for LLM refinement...",
+                    color = Color.Gray
+                )
             }
         }
     }

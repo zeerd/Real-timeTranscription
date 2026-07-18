@@ -20,12 +20,14 @@ class TranscriptionFileManager(private val context: Context) {
     private val defaultFile: File = File(context.filesDir, "autosave_transcription.txt")
 
     suspend fun setUserSelectedUri(uri: Uri?) = withContext(Dispatchers.IO) {
+        Log.d(TAG, "setUserSelectedUri called: ${if (uri != null) uri.toString() else "null (revert to internal storage)"}")
         userSelectedUri = uri
         if (uri != null) {
             selectedFileName = getFileName(uri)
             migrateTempToSelected(uri)
         } else {
             selectedFileName = null
+            Log.i(TAG, "User cleared selected save file, reverting to internal autosave")
         }
     }
 
@@ -73,12 +75,14 @@ class TranscriptionFileManager(private val context: Context) {
     suspend fun saveTranscription(text: String) = withContext(Dispatchers.IO) {
         val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
         val entry = "[$timestamp] $text\n\n"
+        Log.d(TAG, "saveTranscription called (${text.length} chars)")
 
         // 1. Always save to default file (internal storage)
         try {
             FileOutputStream(defaultFile, true).use { 
                 it.write(entry.toByteArray())
             }
+            Log.d(TAG, "Saved to internal autosave file: ${defaultFile.absolutePath}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save to default file: ${e.message}")
         }

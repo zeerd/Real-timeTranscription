@@ -2,6 +2,7 @@ package com.zeerd.real_timetranscriptionapp
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.media.MediaRecorder
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -139,18 +140,51 @@ class MainActivity : ComponentActivity() {
 
         // 统一的状态观察器：这是启动/重启录音管道的唯一入口
         lifecycleScope.launch {
-            // 组合监听：选择的模型变化 OR 模型状态变化
-            modelManager.modelStatuses.collect { statuses ->
-                val selectedId = modelManager.getSelectedModelId()
-                val isReady = modelManager.isModelReady(selectedId)
-                
-                Log.d(TAG, "Sync check: selected=$selectedId, ready=$isReady, currentRunning=$currentModelId")
-
-                if (isReady && currentModelId != selectedId) {
-                    if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                        startAudioPipeline()
-                    }
+            // 合并所有可能触发重启的信号
+            launch {
+                modelManager.settingsChanged.collect {
+                    Log.i(TAG, "Settings change signal received (#$it)")
+                    checkAndStartPipeline()
                 }
+            }
+            launch {
+                modelManager.modelStatuses.collect {
+                    checkAndStartPipeline()
+                }
+            }
+        }
+    }
+
+    private var currentAudioSource: Int? = null
+
+    private fun getAudioSourceName(source: Int?): String {
+        return when (source) {
+            MediaRecorder.AudioSource.MIC -> "MIC"
+            MediaRecorder.AudioSource.CAMCORDER -> "CAMCORDER"
+            MediaRecorder.AudioSource.VOICE_RECOGNITION -> "VOICE_RECOGNITION"
+            MediaRecorder.AudioSource.UNPROCESSED -> "UNPROCESSED"
+            null -> "NONE"
+            else -> "UNKNOWN($source)"
+        }
+    }
+
+    private fun checkAndStartPipeline() {
+        val selectedId = modelManager.getSelectedModelId()
+        val selectedAudioSource = modelManager.getAudioSource()
+        val isReady = modelManager.isModelReady(selectedId)
+        
+        // 使用 Info 级别日志，并显示易读的字符串名称
+        Log.i(TAG, "Pipeline Sync Check: model=$selectedId, audioSource=${getAudioSourceName(selectedAudioSource)}, ready=$isReady, runningModel=$currentModelId, runningSource=${getAudioSourceName(currentAudioSource)}")
+
+        if (isReady) {
+            if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                // 如果发现音源或者模型变了，就重启
+                if (currentModelId != selectedId || currentAudioSource != selectedAudioSource) {
+                    Log.i(TAG, "Change detected (Source: ${getAudioSourceName(currentAudioSource)} -> ${getAudioSourceName(selectedAudioSource)}). Restarting pipeline...")
+                    startAudioPipeline()
+                }
+            } else {
+                Log.w(TAG, "Recording permission not granted, cannot start pipeline")
             }
         }
     }
@@ -171,16 +205,18 @@ class MainActivity : ComponentActivity() {
         val modelId = modelManager.getSelectedModelId()
         val modelDir = modelManager.getModelDir(modelId)
         
-        Log.d(TAG, "Attempting to start audio pipeline with model: $modelId")
+        Log.i(TAG, ">>> RESTARTING AUDIO PIPELINE with model: $modelId")
         
         pipelineJob?.cancel()
         pipelineJob = lifecycleScope.launch {
             // 系统性修复：严格管理 Native 资源释放
+            Log.d(TAG, "Closing old wrappers...")
             whisperWrapper?.close()
             whisperWrapper = null
             vadWrapper?.close()
             vadWrapper = null
             currentModelId = null
+            currentAudioSource = null
             
             val initialized = withContext(Dispatchers.IO) {
                 try {
@@ -197,6 +233,7 @@ class MainActivity : ComponentActivity() {
                     vadWrapper = vad
                     whisperWrapper = whisper
                     currentModelId = modelId
+                    currentAudioSource = modelManager.getAudioSource()
                     
                     vad to whisper
                 } catch (t: Throwable) {
@@ -211,7 +248,8 @@ class MainActivity : ComponentActivity() {
                 val (vad, whisper) = initialized
                 Log.i(TAG, "Pipeline started successfully with $modelId")
 
-                val recorder = AudioRecorder(audioChannel)
+                val audioSource = modelManager.getAudioSource()
+                val recorder = AudioRecorder(audioChannel, audioSource)
                 val pipeline = TranscriptionPipeline(audioChannel, vad, transcriptionChannel)
 
                 launch {

@@ -2,6 +2,7 @@ package com.zeerd.real_timetranscriptionapp
 
 import android.app.DownloadManager
 import android.content.Context
+import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Environment
 import android.util.Log
@@ -85,6 +86,9 @@ class ModelManager(private val context: Context) {
 
     private val _modelStatuses = MutableStateFlow<Map<String, ModelStatus>>(emptyMap())
     val modelStatuses = _modelStatuses.asStateFlow()
+
+    private val _settingsChanged = MutableStateFlow(0)
+    val settingsChanged = _settingsChanged.asStateFlow()
 
     init {
         if (!rootDir.exists()) rootDir.mkdirs()
@@ -393,5 +397,23 @@ class ModelManager(private val context: Context) {
         }
     }
     fun getSelectedModelId(): String = context.getSharedPreferences("settings", Context.MODE_PRIVATE).getString("selected_model", "whisper-tiny") ?: "whisper-tiny"
-    fun setSelectedModelId(modelId: String) = context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putString("selected_model", modelId).apply()
+    fun setSelectedModelId(modelId: String) {
+        Log.i(TAG, "Setting selected model to: $modelId")
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putString("selected_model", modelId).apply()
+        _settingsChanged.update { it + 1 }
+    }
+
+    fun getAudioSource(): Int = context.getSharedPreferences("settings", Context.MODE_PRIVATE).getInt("audio_source", MediaRecorder.AudioSource.VOICE_RECOGNITION)
+    fun setAudioSource(source: Int) {
+        val sourceName = when (source) {
+            MediaRecorder.AudioSource.MIC -> "MIC"
+            MediaRecorder.AudioSource.CAMCORDER -> "CAMCORDER"
+            MediaRecorder.AudioSource.VOICE_RECOGNITION -> "VOICE_RECOGNITION"
+            MediaRecorder.AudioSource.UNPROCESSED -> "UNPROCESSED"
+            else -> "UNKNOWN($source)"
+        }
+        Log.i(TAG, "Setting audio source to: $sourceName")
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putInt("audio_source", source).apply()
+        _settingsChanged.update { it + 1 }
+    }
 }

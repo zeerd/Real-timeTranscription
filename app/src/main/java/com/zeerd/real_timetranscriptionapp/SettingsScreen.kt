@@ -1,5 +1,6 @@
 package com.zeerd.real_timetranscriptionapp
 
+import android.media.MediaRecorder
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -23,6 +24,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 
+data class AudioSourceOption(val name: String, val value: Int, val description: String)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
@@ -31,8 +34,16 @@ fun SettingsScreen(
 ) {
     val modelStatuses by modelManager.modelStatuses.collectAsState()
     val selectedModelId = remember { mutableStateOf(modelManager.getSelectedModelId()) }
+    val selectedAudioSource = remember { mutableIntStateOf(modelManager.getAudioSource()) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+
+    val audioSources = listOf(
+        AudioSourceOption("VOICE_RECOGNITION", MediaRecorder.AudioSource.VOICE_RECOGNITION, "System optimized for voice. Usually includes aggressive noise cancellation."),
+        AudioSourceOption("CAMCORDER", MediaRecorder.AudioSource.CAMCORDER, "Uses secondary/top mic if available. Better for ambient/meeting room audio."),
+        AudioSourceOption("MIC", MediaRecorder.AudioSource.MIC, "Standard primary microphone input."),
+        AudioSourceOption("UNPROCESSED", 9 /* MediaRecorder.AudioSource.UNPROCESSED */, "Raw audio with minimal system processing. (API 24+)")
+    )
 
     var showImportDialog by remember { mutableStateOf(false) }
     var targetModelIdForImport by remember { mutableStateOf("") }
@@ -123,6 +134,48 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             item {
+                Text(
+                    text = "Audio Settings",
+                    style = MaterialTheme.typography.titleLarge
+                )
+                Text(
+                    text = "Choose the recording source based on your environment.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.Gray
+                )
+            }
+
+            items(audioSources) { option ->
+                val isSelected = selectedAudioSource.intValue == option.value
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = {
+                        modelManager.setAudioSource(option.value)
+                        selectedAudioSource.intValue = option.value
+                    },
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer 
+                                         else MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(text = option.name, style = MaterialTheme.typography.titleMedium)
+                            Text(text = option.description, style = MaterialTheme.typography.bodySmall)
+                        }
+                        RadioButton(selected = isSelected, onClick = {
+                            modelManager.setAudioSource(option.value)
+                            selectedAudioSource.intValue = option.value
+                        })
+                    }
+                }
+            }
+
+            item {
+                Spacer(modifier = Modifier.height(16.dp))
                 Text(
                     text = "VAD Model",
                     style = MaterialTheme.typography.titleLarge

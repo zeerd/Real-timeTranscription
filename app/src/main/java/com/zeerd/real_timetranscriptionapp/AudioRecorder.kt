@@ -9,12 +9,19 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 
-class AudioRecorder(private val audioChannel: Channel<ByteArray>) {
+class AudioRecorder(private val audioChannel: Channel<ByteArray>, private val audioSource: Int) {
     private val TAG = "AudioRecorder"
 
     @SuppressLint("MissingPermission")
     suspend fun startRecording() = withContext(Dispatchers.IO) {
-        Log.d(TAG, "Starting AudioRecorder...")
+        val sourceName = when (audioSource) {
+            MediaRecorder.AudioSource.MIC -> "MIC"
+            MediaRecorder.AudioSource.CAMCORDER -> "CAMCORDER"
+            MediaRecorder.AudioSource.VOICE_RECOGNITION -> "VOICE_RECOGNITION"
+            MediaRecorder.AudioSource.UNPROCESSED -> "UNPROCESSED"
+            else -> "UNKNOWN($audioSource)"
+        }
+        Log.i(TAG, "Starting AudioRecord with source: $sourceName")
         val minBufferSize = AudioRecord.getMinBufferSize(
             Constants.SAMPLE_RATE,
             Constants.CHANNEL_CONFIG,
@@ -31,7 +38,7 @@ class AudioRecorder(private val audioChannel: Channel<ByteArray>) {
         
         val recorder = try {
             AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                audioSource,
                 Constants.SAMPLE_RATE,
                 Constants.CHANNEL_CONFIG,
                 Constants.AUDIO_FORMAT,

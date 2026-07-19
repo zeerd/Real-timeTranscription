@@ -20,6 +20,17 @@
     <string name="manage_speakers">管理说话人</string>
     <string name="clear_autosave_history">清除自动保存历史</string>
 
+    <!-- Capture control -->
+    <string name="start_capture">开始录音</string>
+    <string name="stop_capture">停止录音</string>
+
+    <!-- Summarize dialog -->
+    <string name="summarize_title">是否生成本次摘要？</string>
+    <string name="summarize_text">录音已停止。是否使用本地 LLM 对本次转写内容进行总结，并保存到文件？</string>
+    <string name="summarize_yes">总结并保存</string>
+    <string name="summarizing_title">正在生成摘要</string>
+    <string name="summarizing_text">本地 LLM 正在总结转写内容，请稍候…</string>
+
     <!-- Reset dialog -->
     <string name="clear_history_title">清除自动保存历史？</string>
     <string name="clear_history_text">这将永久删除内部自动保存的转写历史，且无法撤销。</string>

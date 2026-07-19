@@ -74,6 +74,7 @@ class TranscriptionFileManager(private val context: Context) {
     private fun migrateTempToSelected() {
         migrateSingle(defaultRawFile, rawFileUri, "raw")
         migrateSingle(defaultFormalFile, formalFileUri, "formal")
+        migrateSummaries()
     }
 
     private fun migrateSingle(tempFile: File, targetUri: Uri?, kind: String) {
@@ -87,6 +88,31 @@ class TranscriptionFileManager(private val context: Context) {
             Log.d(TAG, "Migrated existing $kind transcriptions to selected dir")
         } catch (e: Exception) {
             Log.e(TAG, "Migration of $kind failed: ${e.message}")
+        }
+    }
+
+    /**
+     * 把内部自动保存的摘要文件（summary_*.txt）一并迁移到用户选择的目录。
+     * 摘要文件名带时间戳，需逐个复制到目标树中（保留原文件名，避免互相覆盖）。
+     */
+    private fun migrateSummaries() {
+        if (userSelectedTreeUri == null) return
+        try {
+            val summaries = context.filesDir.listFiles()
+                ?.filter { it.name.startsWith("summary_") && it.name.endsWith(".txt") }
+                ?: emptyList()
+            if (summaries.isEmpty()) return
+            summaries.forEach { file ->
+                val targetUri = createFileInDir(userSelectedTreeUri!!, file.name)
+                if (targetUri != null) {
+                    context.contentResolver.openOutputStream(targetUri)?.use { output ->
+                        FileInputStream(file).use { input -> input.copyTo(output) }
+                    }
+                    Log.d(TAG, "Migrated summary ${file.name} to selected dir")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Migration of summaries failed: ${e.message}")
         }
     }
 
@@ -126,6 +152,43 @@ class TranscriptionFileManager(private val context: Context) {
         val entry = "[$timestamp] $text\n\n"
         Log.d(TAG, "saveRegularized called (${text.length} chars)")
         appendEntry(defaultFormalFile, formalFileUri, entry)
+    }
+
+    /**
+     * 保存一次采集会话的 LLM 摘要到独立文件（summary.txt / summary_<时间戳>.txt）。
+     * 与原始稿、正式稿分开，便于用户单独查看每次会话的总结。
+     *
+     * @return 实际写入的文件路径（内部回退）或 URI 描述，便于 UI 提示
+     */
+    suspend fun saveSummary(text: String): String = withContext(Dispatchers.IO) {
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+        val header = "===== 摘要 (${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())}) =====\n\n"
+        val content = header + text + "\n\n"
+
+        // 优先写入用户选择的目录（带时间戳的独立文件名，避免覆盖）
+        if (userSelectedTreeUri != null) {
+            try {
+                val tree = DocumentFile.fromTreeUri(context, userSelectedTreeUri!!)
+                val doc = tree?.createFile("text/plain", "summary_$timestamp")
+                doc?.uri?.let { uri ->
+                    context.contentResolver.openOutputStream(uri)?.use { it.write(content.toByteArray()) }
+                    Log.i(TAG, "saveSummary saved to user dir: $uri")
+                    return@withContext uri.toString()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "saveSummary to user dir failed: ${e.message}")
+            }
+        }
+
+        // 回退到内部存储（带时间戳，避免多次摘要互相覆盖）
+        val file = File(context.filesDir, "summary_$timestamp.txt")
+        try {
+            file.writeText(content)
+            Log.i(TAG, "saveSummary saved to internal: ${file.absolutePath}")
+        } catch (e: Exception) {
+            Log.e(TAG, "saveSummary to internal failed: ${e.message}")
+        }
+        file.absolutePath
     }
     
     fun getCurrentSaveLocation(): String {

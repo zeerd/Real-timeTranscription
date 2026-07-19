@@ -30,6 +30,12 @@ object TranscriptionState {
     private val _isRecording = MutableStateFlow(false)
     val isRecording = _isRecording.asStateFlow()
 
+    // 用户是否处于「采集会话」中（点击开始 → 点击停止之间）。
+    // 与 isRecording 的区别：isRecording 表示 VAD 检测到语音的瞬时状态，
+    // isCapturing 表示整段采集会话的开关，用于驱动开始/停止按钮的 UI。
+    private val _isCapturing = MutableStateFlow(false)
+    val isCapturing = _isCapturing.asStateFlow()
+
     // 当前音量电平（0~1），用于 UI 指示。
     private val _volumeLevel = MutableStateFlow(0f)
     val volumeLevel = _volumeLevel.asStateFlow()
@@ -41,6 +47,14 @@ object TranscriptionState {
     // 服务内部错误 / 提示信息（如初始化失败），UI 可选择性展示。
     private val _messages = MutableSharedFlow<String>(replay = 0, extraBufferCapacity = 32)
     val messages = _messages.asSharedFlow()
+
+    // 停止采集后，服务把本次会话的完整转写文本推到这里，UI 据此弹出「是否总结」对话框。
+    private val _pendingSummary = MutableSharedFlow<String>(replay = 0, extraBufferCapacity = 1)
+    val pendingSummary = _pendingSummary.asSharedFlow()
+
+    // 是否正在执行 LLM 总结（用于 UI 显示进度）。
+    private val _summarizing = MutableStateFlow(false)
+    val summarizing = _summarizing.asStateFlow()
 
     fun addTranscription(text: String) {
         // 新结果插到队首
@@ -55,6 +69,10 @@ object TranscriptionState {
         _isRecording.value = active
     }
 
+    fun setCapturing(active: Boolean) {
+        _isCapturing.value = active
+    }
+
     fun setVolume(level: Float) {
         _volumeLevel.value = level
     }
@@ -65,6 +83,14 @@ object TranscriptionState {
 
     fun postMessage(msg: String) {
         _messages.tryEmit(msg)
+    }
+
+    fun setPendingSummary(text: String) {
+        _pendingSummary.tryEmit(text)
+    }
+
+    fun setSummarizing(active: Boolean) {
+        _summarizing.value = active
     }
 
     // 清空历史（重置按钮调用，同时服务也会清空文件）。

@@ -116,6 +116,9 @@ class LocalLlmManager(private val context: Context, private val modelDir: File) 
         processingChannel.trySend(turns)
     }
 
+    /** 引擎是否已初始化完成（可用于在推理前判断就绪状态）。 */
+    fun isEngineReady(): Boolean = engine != null
+
     private suspend fun regularizeInternal(turns: List<RawSpeakerTurn>): String = withContext(Dispatchers.Default) {
         val litertEngine = engine ?: run {
             Log.w(TAG, "[V2_LLM] Engine not initialized, skipping regularization")
@@ -148,19 +151,62 @@ class LocalLlmManager(private val context: Context, private val modelDir: File) 
         Log.i(TAG, "[V2_LLM] Starting inference for ${turns.size} turns. Input size: ${inputPayload.length} chars")
         Log.d(TAG, "[V2_LLM] Prompt preview: \"${prompt.take(100)}\"")
         
-        try {
+        runInference(litertEngine, systemPrompt, prompt)
+    }
+
+    /**
+     * 对一段完整文本做「总结摘要」。与 [regularizeInternal] 不同，这里允许对内容进行
+     * 概括与提炼，输出结构化的要点摘要，而非逐字保留。
+     *
+     * @param text 待总结的文本（通常是本次采集会话的全部转写内容）
+     * @return LLM 生成的摘要；引擎未就绪或失败时返回空字符串
+     */
+    suspend fun summarize(text: String): String = withContext(Dispatchers.Default) {
+        val litertEngine = engine ?: run {
+            Log.w(TAG, "[V2_LLM] Engine not initialized, skipping summarization")
+            return@withContext ""
+        }
+        if (text.isBlank()) {
+            Log.w(TAG, "[V2_LLM] Empty text, skipping summarization")
+            return@withContext ""
+        }
+
+        val systemPrompt = """
+你是一位专业的会议/对话记录整理助手。你的任务是将一段完整的语音转写文本，提炼为简洁、结构清晰的摘要。
+
+要求
+1： 用简体中文输出（除非原文为英文，则保持英文）。
+2： 先给出一段 2~4 句话的总体概述，概括本次对话/会议的核心主题与结论。
+3： 随后以「要点」形式分条列出关键信息、决策、待办事项或重要结论（使用 - 项目符号）。
+4： 若涉及不同发言人，可在要点中标注其观点归属（如 [发言人姓名]）。
+5： 不要编造原文中不存在的信息；若内容过于零散无法归纳，可如实说明。
+""".trimIndent()
+
+        val prompt = "以下是本次采集的完整转写内容，请对其进行总结摘要：\n\n$text\n\n请输出摘要。/no_think"
+
+        Log.i(TAG, "[V2_LLM] Starting summarization. Input size: ${text.length} chars")
+        runInference(litertEngine, systemPrompt, prompt)
+    }
+
+    /**
+     * 在给定引擎上执行一次完整的推理（创建会话 → 流式收集 → 去除思考标签 → 返回文本）。
+     * 供 [regularizeInternal] 与 [summarize] 复用。
+     */
+    private suspend fun runInference(
+        litertEngine: Engine,
+        systemPrompt: String,
+        prompt: String
+    ): String {
+        return try {
             var fullResponse = ""
             val startTime = System.currentTimeMillis()
-            // var thinkingConfig = ThinkingConfig(
-            //     enableThinking = false,
-            // )
             val config = ConversationConfig(
                 systemInstruction = Contents.of(systemPrompt)
             )
             val conversation = litertEngine.createConversation(config)
             try {
                 val responseBuilder = StringBuilder()
-                conversation?.sendMessageAsync(prompt, /*thinkingConfig = thinkingConfig*/)?.collect { partialResponse ->
+                conversation?.sendMessageAsync(prompt)?.collect { partialResponse ->
                     val partial = partialResponse.toString()
                     responseBuilder.append(partial)
                 }

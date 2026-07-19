@@ -51,8 +51,12 @@ class MainActivity : ComponentActivity() {
     private val transcriptions = mutableStateListOf<String>()
     private val regularizedTranscriptions = mutableStateListOf<String>()
     private val isRecording = mutableStateOf(false)
+    private val isCapturing = mutableStateOf(false)
+    private val summarizing = mutableStateOf(false)
     private val volumeLevel = mutableStateOf(0f)
     private val saveLocationDescription = mutableStateOf("")
+    // 停止采集后，服务推送的待总结文本；非空时弹出「是否总结」对话框
+    private val pendingSummaryText = mutableStateOf<String?>(null)
 
     private lateinit var app: TranscriptionApplication
 
@@ -61,7 +65,8 @@ class MainActivity : ComponentActivity() {
     ) { isGranted: Boolean ->
         Log.d(TAG, "Permission RECORD_AUDIO granted: $isGranted")
         if (isGranted) {
-            // 授权后启动前台服务（服务内部会做管线同步检查）
+            // 授权后仅启动前台服务（挂在前台、恢复历史），不自动录音。
+            // 录音由 UI 的「开始」按钮手动触发。
             TranscriptionService.start(this)
         } else {
             val msg = "Permission denied. App cannot record audio."
@@ -131,9 +136,26 @@ class MainActivity : ComponentActivity() {
                                 transcriptions = transcriptions,
                                 regularizedTranscriptions = regularizedTranscriptions,
                                 isRecording = isRecording.value,
+                                isCapturing = isCapturing.value,
+                                summarizing = summarizing.value,
+                                pendingSummaryText = pendingSummaryText.value,
+                                onDismissSummaryDialog = { pendingSummaryText.value = null },
                                 volumeLevel = volumeLevel.value,
                                 saveLocation = saveLocationDescription.value,
                                 llmPolishingEnabled = app.modelManager.isLlmPolishingEnabled(),
+                                onStartCapture = {
+                                    Log.d(TAG, "[USER_ACTION] Start capture button pressed")
+                                    TranscriptionService.startCapture(this@MainActivity)
+                                },
+                                onStopCapture = {
+                                    Log.d(TAG, "[USER_ACTION] Stop capture button pressed")
+                                    TranscriptionService.stopCapture(this@MainActivity)
+                                },
+                                onConfirmSummary = { text ->
+                                    Log.d(TAG, "[USER_ACTION] Confirmed summarize, sending to service")
+                                    pendingSummaryText.value = null
+                                    TranscriptionService.requestSummary(this@MainActivity, text)
+                                },
                                 onResetHistory = {
                                     lifecycleScope.launch {
                                         app.fileManager.clearAutosaveHistory()
@@ -177,6 +199,17 @@ class MainActivity : ComponentActivity() {
             TranscriptionState.isRecording.collect { isRecording.value = it }
         }
         lifecycleScope.launch {
+            TranscriptionState.isCapturing.collect { isCapturing.value = it }
+        }
+        lifecycleScope.launch {
+            TranscriptionState.summarizing.collect { summarizing.value = it }
+        }
+        lifecycleScope.launch {
+            TranscriptionState.pendingSummary.collect { text ->
+                pendingSummaryText.value = text
+            }
+        }
+        lifecycleScope.launch {
             TranscriptionState.volumeLevel.collect { volumeLevel.value = it }
         }
 
@@ -197,8 +230,8 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * 确保前台转写服务在运行：若已就绪的 ASR 模型存在，则启动服务（服务内部会
-     * 检查权限与模型变化并自行启动/重启管线）。缺少麦克风权限时在此请求。
+     * 确保前台转写服务在运行：若已就绪的 ASR 模型存在，则启动服务（服务仅挂在前台、
+     * 恢复历史，不会自动录音）。缺少麦克风权限时在此请求。录音由 UI 的「开始」按钮触发。
      */
     private fun ensureServiceRunning() {
         val selectedId = app.modelManager.getSelectedModelId()
@@ -211,7 +244,7 @@ class MainActivity : ComponentActivity() {
             requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             return
         }
-        Log.i(TAG, "Ensuring TranscriptionService is running")
+        Log.i(TAG, "Ensuring TranscriptionService is running (foreground only, no auto-capture)")
         TranscriptionService.start(this)
     }
 
@@ -226,9 +259,16 @@ fun TranscriptionScreen(
     transcriptions: List<String>,
     regularizedTranscriptions: List<String>,
     isRecording: Boolean,
+    isCapturing: Boolean,
+    summarizing: Boolean,
+    pendingSummaryText: String?,
+    onDismissSummaryDialog: () -> Unit,
     volumeLevel: Float,
     saveLocation: String,
     llmPolishingEnabled: Boolean,
+    onStartCapture: () -> Unit,
+    onStopCapture: () -> Unit,
+    onConfirmSummary: (String) -> Unit,
     onResetHistory: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -264,6 +304,43 @@ fun TranscriptionScreen(
 
     if (showSpeakersDialog) {
         ManageSpeakersDialog(onDismiss = { showSpeakersDialog = false })
+    }
+
+    // 停止采集后，询问是否对本次会话做 LLM 总结
+    if (pendingSummaryText != null) {
+        AlertDialog(
+            onDismissRequest = onDismissSummaryDialog,
+            title = { Text(stringResource(R.string.summarize_title)) },
+            text = { Text(stringResource(R.string.summarize_text)) },
+            confirmButton = {
+                TextButton(
+                    onClick = { onConfirmSummary(pendingSummaryText) },
+                    enabled = !summarizing
+                ) { Text(stringResource(R.string.summarize_yes)) }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = onDismissSummaryDialog,
+                    enabled = !summarizing
+                ) { Text(stringResource(R.string.cancel)) }
+            }
+        )
+    }
+
+    // 总结进行中的进度提示
+    if (summarizing) {
+        AlertDialog(
+            onDismissRequest = { },
+            title = { Text(stringResource(R.string.summarizing_title)) },
+            text = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(stringResource(R.string.summarizing_text))
+                }
+            },
+            confirmButton = { }
+        )
     }
 
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
@@ -328,7 +405,22 @@ fun TranscriptionScreen(
         }
         
         StatusCard(isRecording, volumeLevel)
-        
+
+        Spacer(modifier = Modifier.height(12.dp))
+
+        // 开始 / 停止 采集按钮（手动控制录音）
+        Button(
+            onClick = {
+                if (isCapturing) onStopCapture() else onStartCapture()
+            },
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (isCapturing) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+            )
+        ) {
+            Text(if (isCapturing) stringResource(R.string.stop_capture) else stringResource(R.string.start_capture))
+        }
+
         Spacer(modifier = Modifier.height(16.dp))
         
         val currentList = if (selectedTab == 0) transcriptions else regularizedTranscriptions

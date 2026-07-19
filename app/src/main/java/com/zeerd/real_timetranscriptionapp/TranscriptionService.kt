@@ -19,6 +19,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
@@ -79,11 +80,28 @@ class TranscriptionService : Service() {
                 stopSelf()
                 return START_NOT_STICKY
             }
-            else -> {
-                // 首次启动：先恢复历史到 UI，再启动前台通知与管线
+            ACTION_START_CAPTURE -> {
+                // 用户点击「开始」：确保服务在前台运行，并启动录音管线
                 startForegroundSafely()
                 restoreHistoryToUi()
                 checkAndStartPipeline()
+            }
+            ACTION_STOP_CAPTURE -> {
+                // 用户点击「停止」：停止录音管线，但保留服务存活以便后续做摘要。
+                // 停止后把本次会话的完整转写文本推给 UI，由其弹出「是否总结」对话框。
+                Log.i(TAG, "Received STOP_CAPTURE action, stopping pipeline but keeping service")
+                stopCapture()
+            }
+            ACTION_SUMMARIZE -> {
+                // 用户确认对本次会话做总结：执行 LLM 摘要并保存
+                val text = intent.getStringExtra(EXTRA_SUMMARY_TEXT) ?: ""
+                runSummary(text)
+            }
+            else -> {
+                // 首次启动（无 action）：仅把服务挂到前台并恢复历史，不自动录音。
+                // 录音改为由 UI 的「开始」按钮手动触发，避免无界面时静默录音。
+                startForegroundSafely()
+                restoreHistoryToUi()
             }
         }
         // 若被系统杀死，不要自动重启（避免无界面时静默录音）
@@ -301,6 +319,7 @@ class TranscriptionService : Service() {
                 val (vad, whisper) = initialized
                 Log.i(TAG, "Pipeline started successfully with $modelId")
                 isPipelineStarting = false
+                TranscriptionState.setCapturing(true)
 
                 val audioSource = modelManager.getAudioSource()
                 val recorder = AudioRecorder(audioChannel, audioSource)
@@ -353,6 +372,93 @@ class TranscriptionService : Service() {
         }
     }
 
+    /**
+     * 停止当前采集会话：取消录音管线协程，释放 Native 资源，并把本次会话的完整转写
+     * 文本推给 UI（用于弹出「是否总结」对话框）。服务本身保持前台存活。
+     */
+    private fun stopCapture() {
+        Log.i(TAG, "stopCapture: cancelling pipeline")
+        pipelineJob?.cancel()
+        observeJobs.forEach { it.cancel() }
+        observeJobs.clear()
+        whisperWrapper?.close()
+        whisperWrapper = null
+        vadWrapper?.close()
+        vadWrapper = null
+        diarizationManager?.release()
+        diarizationManager = null
+        // 注意：llmManager 暂不释放，停止后做摘要时可能复用
+        currentModelId = null
+        currentAudioSource = null
+        isPipelineStarting = false
+        TranscriptionState.setRecording(false)
+        TranscriptionState.setCapturing(false)
+        updateNotification(false)
+
+        // 收集本次会话的完整转写文本（原始稿，含说话人标签），交给 UI 决定是否总结
+        val sessionText = TranscriptionState.transcriptions.value.joinToString("\n") { it }
+        if (sessionText.isNotBlank()) {
+            TranscriptionState.setPendingSummary(sessionText)
+            Log.i(TAG, "[STOP_CAPTURE] Pushed pending summary (${sessionText.length} chars) to UI")
+        } else {
+            Log.w(TAG, "[STOP_CAPTURE] No transcription captured this session")
+        }
+    }
+
+    /**
+     * 对本次采集会话的完整转写文本执行 LLM 摘要，并自动保存到文件。
+     * 由 UI 在用户确认「停止后总结」时通过 [ACTION_SUMMARIZE] 触发。
+     */
+    private fun runSummary(text: String) {
+        if (text.isBlank()) {
+            Log.w(TAG, "runSummary: empty text, nothing to summarize")
+            TranscriptionState.postMessage("没有可总结的内容")
+            return
+        }
+        val selectedLlmId = modelManager.getSelectedLlmModelId()
+        // 总结功能独立于「LLM 润色」开关：只要 LLM 模型本身就绪即可，
+        // 不受 isLlmPolishingEnabled() 影响（润色关闭时仍可单独生成摘要）。
+        if (!modelManager.isModelReady(selectedLlmId)) {
+            Log.w(TAG, "runSummary: LLM not available (ready=${modelManager.isModelReady(selectedLlmId)})")
+            TranscriptionState.postMessage("缺少可用的 LLM 模型，无法生成摘要")
+            return
+        }
+
+        serviceScope.launch {
+            // 确保 LLM 引擎已就绪（复用管线里已初始化的实例，否则临时创建一个）
+            val mgr = llmManager ?: run {
+                val llmModelDir = modelManager.getModelDir(selectedLlmId)
+                LocalLlmManager(this@TranscriptionService, llmModelDir).also { llmManager = it }
+            }
+            // 等待引擎初始化完成（最多约 15s）
+            var waited = 0
+            while (!mgr.isEngineReady() && waited < 15000) {
+                delay(300)
+                waited += 300
+            }
+            if (!mgr.isEngineReady()) {
+                TranscriptionState.setSummarizing(false)
+                TranscriptionState.postMessage("LLM 引擎尚未就绪，无法生成摘要")
+                Log.w(TAG, "[SUMMARY] Engine not ready after waiting")
+                return@launch
+            }
+
+            TranscriptionState.setSummarizing(true)
+            Log.i(TAG, "[SUMMARY] Starting summarization of ${text.length} chars")
+            val summary = mgr.summarize(text)
+            TranscriptionState.setSummarizing(false)
+
+            if (summary.isNotBlank()) {
+                val path = fileManager.saveSummary(summary)
+                TranscriptionState.postMessage("摘要已保存：$path")
+                Log.i(TAG, "[SUMMARY] Saved summary to $path")
+            } else {
+                TranscriptionState.postMessage("摘要生成失败，请重试")
+                Log.w(TAG, "[SUMMARY] summarize returned empty")
+            }
+        }
+    }
+
     override fun onDestroy() {
         Log.d(TAG, "onDestroy, closing resources")
         pipelineJob?.cancel()
@@ -366,6 +472,7 @@ class TranscriptionService : Service() {
         llmManager?.release()
         TranscriptionState.setServiceRunning(false)
         TranscriptionState.setRecording(false)
+        TranscriptionState.setCapturing(false)
         super.onDestroy()
     }
 
@@ -373,6 +480,10 @@ class TranscriptionService : Service() {
 
     companion object {
         const val ACTION_STOP = "com.zeerd.real_timetranscriptionapp.action.STOP"
+        const val ACTION_START_CAPTURE = "com.zeerd.real_timetranscriptionapp.action.START_CAPTURE"
+        const val ACTION_STOP_CAPTURE = "com.zeerd.real_timetranscriptionapp.action.STOP_CAPTURE"
+        const val ACTION_SUMMARIZE = "com.zeerd.real_timetranscriptionapp.action.SUMMARIZE"
+        const val EXTRA_SUMMARY_TEXT = "extra_summary_text"
 
         /** 启动前台转写服务（幂等：若已在运行则仅触发一次管线同步检查）。 */
         fun start(context: Context) {
@@ -382,6 +493,27 @@ class TranscriptionService : Service() {
 
         fun stop(context: Context) {
             val intent = Intent(context, TranscriptionService::class.java).apply { action = ACTION_STOP }
+            context.startService(intent)
+        }
+
+        /** 用户点击「开始」：启动前台服务并开启录音管线。 */
+        fun startCapture(context: Context) {
+            val intent = Intent(context, TranscriptionService::class.java).apply { action = ACTION_START_CAPTURE }
+            ContextCompat.startForegroundService(context, intent)
+        }
+
+        /** 用户点击「停止」：停止录音管线，保留服务存活以便后续做摘要。 */
+        fun stopCapture(context: Context) {
+            val intent = Intent(context, TranscriptionService::class.java).apply { action = ACTION_STOP_CAPTURE }
+            context.startService(intent)
+        }
+
+        /** 用户确认对本次会话做总结：把完整转写文本交给服务执行 LLM 摘要并保存。 */
+        fun requestSummary(context: Context, text: String) {
+            val intent = Intent(context, TranscriptionService::class.java).apply {
+                action = ACTION_SUMMARIZE
+                putExtra(EXTRA_SUMMARY_TEXT, text)
+            }
             context.startService(intent)
         }
     }

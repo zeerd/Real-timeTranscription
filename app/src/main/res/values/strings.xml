@@ -20,6 +20,17 @@
     <string name="manage_speakers">Manage Speakers</string>
     <string name="clear_autosave_history">Clear Autosave History</string>
 
+    <!-- Capture control -->
+    <string name="start_capture">Start Recording</string>
+    <string name="stop_capture">Stop Recording</string>
+
+    <!-- Summarize dialog -->
+    <string name="summarize_title">Summarize this session?</string>
+    <string name="summarize_text">Recording stopped. Would you like to generate a summary of the captured transcript using the local LLM and save it to a file?</string>
+    <string name="summarize_yes">Summarize &amp; Save</string>
+    <string name="summarizing_title">Generating Summary</string>
+    <string name="summarizing_text">The local LLM is summarizing the transcript. Please wait…</string>
+
     <!-- Reset dialog -->
     <string name="clear_history_title">Clear Autosave History?</string>
     <string name="clear_history_text">This will permanently delete the internal autosave transcription history. This cannot be undone.</string>

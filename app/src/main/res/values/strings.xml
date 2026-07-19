@@ -1,3 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Real-time Transcription App</string>
+
+    <!-- Language -->
+    <string name="language">Language</string>
+    <string name="language_system">Follow System</string>
+    <string name="language_english">English</string>
+    <string name="language_chinese">Chinese</string>
+
+    <!-- Transcription screen -->
+    <string name="real_time_transcription">Real-time Transcription</string>
+    <string name="tab_raw">Live Stream (Raw)</string>
+    <string name="tab_formal">Formal (Polished)</string>
+    <string name="saving_to">Saving to:</string>
+    <string name="recording_speech">Recording Speech…</string>
+    <string name="listening_speech">Listening for Speech…</string>
+    <string name="speak_to_start">Speak to start capturing…</string>
+    <string name="waiting_llm">Waiting for LLM refinement…</string>
+    <string name="manage_speakers">Manage Speakers</string>
+    <string name="clear_autosave_history">Clear Autosave History</string>
+
+    <!-- Reset dialog -->
+    <string name="clear_history_title">Clear Autosave History?</string>
+    <string name="clear_history_text">This will permanently delete the internal autosave transcription history. This cannot be undone.</string>
+    <string name="clear">Clear</string>
+    <string name="cancel">Cancel</string>
+
+    <!-- Manage speakers dialog -->
+    <string name="manage_speakers_title">Manage Speakers</string>
+    <string name="no_speakers">No speakers detected yet. Start speaking to capture speakers.</string>
+    <string name="name_placeholder">Name</string>
+    <string name="save">Save</string>
+
+    <!-- Settings screen -->
+    <string name="model_settings">Model Settings</string>
+    <string name="back">Back</string>
+    <string name="audio_settings">Audio Settings</string>
+    <string name="audio_settings_desc">Choose the recording source based on your environment.</string>
+    <string name="audio_voice_recognition">System optimized for voice. Usually includes aggressive noise cancellation.</string>
+    <string name="audio_camcorder">Uses secondary/top mic if available. Better for ambient/meeting room audio.</string>
+    <string name="audio_mic">Standard primary microphone input.</string>
+    <string name="audio_unprocessed">Raw audio with minimal system processing. (API 24+)</string>
+    <string name="vad_model">VAD Model</string>
+    <string name="silero_vad_builtin">Silero VAD (built-in)</string>
+    <string name="vad_desc">Voice Activity Detection is required to segment audio. This model is bundled with the app and always available — no import or download needed.</string>
+    <string name="status_ready">Status: Ready</string>
+    <string name="asr_models">ASR Models</string>
+    <string name="asr_models_desc">All models are installed by importing files you downloaded manually. The links below are optional defaults — you may download any sherpa-onnx supported model instead.</string>
+    <string name="import_asr_archive">Import ASR Archive (.tar.bz2)</string>
+    <string name="optional_default_downloads">Optional default model downloads:</string>
+    <string name="speaker_diarization">Speaker Diarization</string>
+    <string name="speaker_diarization_desc">Identifies different speakers by voiceprint. Enables \"Speaker 1\", \"Speaker 2\" labels in transcripts.</string>
+    <string name="import_speaker_model">Import Speaker Model (.onnx)</string>
+    <string name="local_llm">Local LLM (LiteRT)</string>
+    <string name="local_llm_desc">Used for semantic paragraphing and formatting. Import your own .tflite model, or use the optional default link below.</string>
+    <string name="enable_llm_polishing">Enable LLM Polishing</string>
+    <string name="enable_llm_polishing_desc">When off, only the raw ASR transcript is kept; no semantic formatting is applied.</string>
+    <string name="import_litert_model">Import LiteRT Model (.tflite)</string>
+
+    <!-- Delete dialog -->
+    <string name="delete_model_title">Delete Model?</string>
+    <string name="delete_model_text">This will remove the downloaded files for %1$s. You will need to download it again to use it.</string>
+    <string name="delete">Delete</string>
+
+    <!-- Toasts -->
+    <string name="importing_file">Importing %1$s…</string>
+    <string name="importing_archive">Importing archive…</string>
+    <string name="import_success">Import successful!</string>
+    <string name="import_failed">Import failed: %1$s</string>
+
+    <!-- Model item statuses -->
+    <string name="not_installed">Not installed</string>
+    <string name="error">Error</string>
+
+    <!-- Notification -->
+    <string name="notification_title">Real-time transcription in progress</string>
+    <string name="notification_recording">Recording and transcribing…</string>
+    <string name="notification_listening">Listening…</string>
+    <string name="notification_stop">Stop</string>
 </resources>

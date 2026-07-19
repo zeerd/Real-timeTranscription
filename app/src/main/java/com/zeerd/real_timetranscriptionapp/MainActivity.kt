@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.content.res.Configuration
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -26,6 +27,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
@@ -40,6 +42,10 @@ import kotlinx.coroutines.withContext
 private const val TAG = "MainActivity"
 
 class MainActivity : ComponentActivity() {
+    override fun applyOverrideConfiguration(newConfig: Configuration?) {
+        super.applyOverrideConfiguration(newConfig ?: LocaleHelper.newConfiguration(this))
+    }
+
     // 注意：管线已迁移到 TranscriptionService（前台服务），Activity 不再持有任何
     // Native 资源或录音协程。这里只保留 UI 状态，全部来自 TranscriptionState 单例。
     private val transcriptions = mutableStateListOf<String>()
@@ -109,14 +115,14 @@ class MainActivity : ComponentActivity() {
                                         },
                                         containerColor = MaterialTheme.colorScheme.secondaryContainer
                                     ) {
-                                        Icon(Icons.Default.Settings, contentDescription = "Settings")
+                                        Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.model_settings))
                                     }
                                     Spacer(modifier = Modifier.height(16.dp))
                                     FloatingActionButton(onClick = {
                                         Log.d(TAG, "[USER_ACTION] Opening save-dir picker")
                                         openDocumentTreeLauncher.launch(null)
                                     }) {
-                                        Icon(Icons.Default.Save, contentDescription = "Set Save Directory")
+                                        Icon(Icons.Default.Save, contentDescription = stringResource(R.string.saving_to))
                                     }
                                 }
                             }
@@ -228,15 +234,15 @@ fun TranscriptionScreen(
 ) {
     // 默认标签页：LLM 润色开启时显示「正式稿」(1)，关闭时显示「实时流」(0)
     var selectedTab by remember { mutableIntStateOf(if (llmPolishingEnabled) 1 else 0) }
-    val tabs = listOf("实时流 (Raw)", "正式稿 (Formal)")
+    val tabs = listOf(stringResource(R.string.tab_raw), stringResource(R.string.tab_formal))
     var showResetDialog by remember { mutableStateOf(false) }
     var showSpeakersDialog by remember { mutableStateOf(false) }
 
     if (showResetDialog) {
         AlertDialog(
             onDismissRequest = { showResetDialog = false },
-            title = { Text("Clear Autosave History?") },
-            text = { Text("This will permanently delete the internal autosave transcription history. This cannot be undone.") },
+            title = { Text(stringResource(R.string.clear_history_title)) },
+            text = { Text(stringResource(R.string.clear_history_text)) },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -245,13 +251,13 @@ fun TranscriptionScreen(
                         onResetHistory()
                     },
                     colors = ButtonDefaults.textButtonColors(contentColor = Color.Red)
-                ) { Text("Clear") }
+                ) { Text(stringResource(R.string.clear)) }
             },
             dismissButton = {
                 TextButton(onClick = {
                     Log.d(TAG, "[USER_ACTION] Cancelled clear autosave history dialog")
                     showResetDialog = false
-                }) { Text("Cancel") }
+                }) { Text(stringResource(R.string.cancel)) }
             }
         )
     }
@@ -267,7 +273,7 @@ fun TranscriptionScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = "Real-time Transcription",
+                text = stringResource(R.string.real_time_transcription),
                 style = MaterialTheme.typography.headlineSmall
             )
             Row {
@@ -277,7 +283,7 @@ fun TranscriptionScreen(
                         showSpeakersDialog = true
                     }
                 ) {
-                    Icon(Icons.Default.Person, contentDescription = "Manage Speakers")
+                    Icon(Icons.Default.Person, contentDescription = stringResource(R.string.manage_speakers))
                 }
                 IconButton(
                     onClick = {
@@ -285,7 +291,7 @@ fun TranscriptionScreen(
                         showResetDialog = true
                     }
                 ) {
-                    Icon(Icons.Default.Delete, contentDescription = "Clear Autosave History")
+                    Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.clear_autosave_history))
                 }
             }
         }
@@ -309,7 +315,7 @@ fun TranscriptionScreen(
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
                 Text(
-                    text = "Saving to:",
+                    text = stringResource(R.string.saving_to),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSecondaryContainer
                 )
@@ -346,7 +352,7 @@ fun TranscriptionScreen(
         if (currentList.isEmpty()) {
             Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                 Text(
-                    text = if (selectedTab == 0) "Speak to start capturing..." else "Waiting for LLM refinement...",
+                    text = if (selectedTab == 0) stringResource(R.string.speak_to_start) else stringResource(R.string.waiting_llm),
                     color = Color.Gray
                 )
             }
@@ -364,10 +370,10 @@ fun ManageSpeakersDialog(onDismiss: () -> Unit) {
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Manage Speakers") },
+        title = { Text(stringResource(R.string.manage_speakers_title)) },
         text = {
             if (knownIds.isEmpty()) {
-                Text("No speakers detected yet. Start speaking to capture speakers.")
+                Text(stringResource(R.string.no_speakers))
             } else {
                 LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp)) {
                     items(knownIds) { id ->
@@ -384,7 +390,7 @@ fun ManageSpeakersDialog(onDismiss: () -> Unit) {
                             OutlinedTextField(
                                 value = edit.value,
                                 onValueChange = { edit.value = it },
-                                placeholder = { Text("Name") },
+                                placeholder = { Text(stringResource(R.string.name_placeholder)) },
                                 singleLine = true,
                                 modifier = Modifier.weight(1f)
                             )
@@ -402,10 +408,10 @@ fun ManageSpeakersDialog(onDismiss: () -> Unit) {
                     }
                     onDismiss()
                 }
-            ) { Text("Save") }
+            ) { Text(stringResource(R.string.save)) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
         }
     )
 }
@@ -427,7 +433,7 @@ fun StatusCard(isRecording: Boolean, volumeLevel: Float) {
                     .background(if (isRecording) Color.Red else Color.Gray, RoundedCornerShape(50))
             )
             Spacer(modifier = Modifier.width(8.dp))
-            Text(text = if (isRecording) "Recording Speech..." else "Listening for Speech...")
+            Text(text = if (isRecording) stringResource(R.string.recording_speech) else stringResource(R.string.listening_speech))
         }
     }
 }

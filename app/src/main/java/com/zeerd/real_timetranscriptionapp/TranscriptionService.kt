@@ -37,6 +37,10 @@ import java.io.File
 class TranscriptionService : Service() {
     private val TAG = "TranscriptionService"
 
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(LocaleHelper.wrapContext(newBase))
+    }
+
     private val app by lazy { application as TranscriptionApplication }
     private val modelManager by lazy { app.modelManager }
     private val fileManager by lazy { app.fileManager }
@@ -123,12 +127,12 @@ class TranscriptionService : Service() {
         )
 
         return NotificationCompat.Builder(this, TranscriptionApplication.NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("实时转写进行中")
-            .setContentText(if (isRecording) "正在录音并转写…" else "正在聆听…")
+            .setContentTitle(getString(R.string.notification_title))
+            .setContentText(if (isRecording) getString(R.string.notification_recording) else getString(R.string.notification_listening))
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(contentIntent)
             .setOngoing(true)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止", stopPending)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, getString(R.string.notification_stop), stopPending)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }

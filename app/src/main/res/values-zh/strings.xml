@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">实时转写应用</string>
+
+    <!-- Language -->
+    <string name="language">语言</string>
+    <string name="language_system">跟随系统</string>
+    <string name="language_english">英文</string>
+    <string name="language_chinese">中文</string>
+
+    <!-- Transcription screen -->
+    <string name="real_time_transcription">实时转写</string>
+    <string name="tab_raw">实时流（原始）</string>
+    <string name="tab_formal">正式稿（润色）</string>
+    <string name="saving_to">保存位置：</string>
+    <string name="recording_speech">正在录音转写…</string>
+    <string name="listening_speech">正在聆听…</string>
+    <string name="speak_to_start">开始说话即可记录…</string>
+    <string name="waiting_llm">等待 LLM 润色…</string>
+    <string name="manage_speakers">管理说话人</string>
+    <string name="clear_autosave_history">清除自动保存历史</string>
+
+    <!-- Reset dialog -->
+    <string name="clear_history_title">清除自动保存历史？</string>
+    <string name="clear_history_text">这将永久删除内部自动保存的转写历史，且无法撤销。</string>
+    <string name="clear">清除</string>
+    <string name="cancel">取消</string>
+
+    <!-- Manage speakers dialog -->
+    <string name="manage_speakers_title">管理说话人</string>
+    <string name="no_speakers">尚未检测到说话人。开始说话以捕获说话人。</string>
+    <string name="name_placeholder">名称</string>
+    <string name="save">保存</string>
+
+    <!-- Settings screen -->
+    <string name="model_settings">模型设置</string>
+    <string name="back">返回</string>
+    <string name="audio_settings">音频设置</string>
+    <string name="audio_settings_desc">根据你的环境选择录音来源。</string>
+    <string name="audio_voice_recognition">系统针对语音优化，通常包含较强的降噪处理。</string>
+    <string name="audio_camcorder">使用副麦克风/顶部麦克风（若可用），更适合环境/会议室录音。</string>
+    <string name="audio_mic">标准的主麦克风输入。</string>
+    <string name="audio_unprocessed">经过最少系统处理的原始音频。（API 24+）</string>
+    <string name="vad_model">VAD 模型</string>
+    <string name="silero_vad_builtin">Silero VAD（内置）</string>
+    <string name="vad_desc">语音活动检测用于切分音频。该模型已随应用打包，始终可用——无需导入或下载。</string>
+    <string name="status_ready">状态：就绪</string>
+    <string name="asr_models">ASR 模型</string>
+    <string name="asr_models_desc">所有模型均通过手动下载文件后导入安装。以下链接为可选的默认项——你也可以下载任何 sherpa-onnx 支持的模型。</string>
+    <string name="import_asr_archive">导入 ASR 压缩包（.tar.bz2）</string>
+    <string name="optional_default_downloads">可选的默认模型下载：</string>
+    <string name="speaker_diarization">说话人分离</string>
+    <string name="speaker_diarization_desc">通过声纹识别不同说话人，在转写中显示「说话人 1」「说话人 2」等标签。</string>
+    <string name="import_speaker_model">导入说话人模型（.onnx）</string>
+    <string name="local_llm">本地 LLM（LiteRT）</string>
+    <string name="local_llm_desc">用于语义分段与格式化。导入你自己的 .tflite 模型，或使用下方可选的默认链接。</string>
+    <string name="enable_llm_polishing">启用 LLM 润色</string>
+    <string name="enable_llm_polishing_desc">关闭后仅保留原始 ASR 转写，不做语义格式化。</string>
+    <string name="import_litert_model">导入 LiteRT 模型（.tflite）</string>
+
+    <!-- Delete dialog -->
+    <string name="delete_model_title">删除模型？</string>
+    <string name="delete_model_text">这将删除 %1$s 的已下载文件。如需使用需重新下载。</string>
+    <string name="delete">删除</string>
+
+    <!-- Toasts -->
+    <string name="importing_file">正在导入 %1$s…</string>
+    <string name="importing_archive">正在导入压缩包…</string>
+    <string name="import_success">导入成功！</string>
+    <string name="import_failed">导入失败：%1$s</string>
+
+    <!-- Model item statuses -->
+    <string name="not_installed">未安装</string>
+    <string name="error">错误</string>
+
+    <!-- Notification -->
+    <string name="notification_title">实时转写进行中</string>
+    <string name="notification_recording">正在录音并转写…</string>
+    <string name="notification_listening">正在聆听…</string>
+    <string name="notification_stop">停止</string>
+</resources>

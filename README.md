@@ -31,44 +31,110 @@
 - **并发模型**：Kotlin 协程（Coroutines）+ 通道（Channel），以「生产者-消费者」管线串联各处理阶段
 - **推理引擎**：ONNX Runtime（VAD）、sherpa-onnx（ASR）、Google AI Edge LiteRT（LLM）
 - **最低 / 目标 SDK**：minSdk 26（Android 8.0）/ targetSdk 35
+- **参数**：音频以 16kHz 单声道 PCM 采集，按 512 样本（32ms）为一帧
 
-### 2.2 处理管线（Pipeline）
+### 2.2 架构
 
-音频以 16kHz 单声道 PCM 采集，按 512 样本（32ms）为一帧，经以下阶段流动：
+```dot
+digraph "Architecture" {
+    rankdir=TB;
+    bgcolor="transparent";
+    nodesep=0.3;
+    ranksep=0.7;
+    node [fontname="Helvetica,Arial,sans-serif", fontsize=9,
+          shape=box, style="filled,rounded", penwidth=1.2, margin=0.1];
+    edge [color="#555555", fontsize=8, fontname="Helvetica,Arial,sans-serif",
+          penwidth=1.0, style="dashed", labelangle=0, labeldistance=1.1];
 
-```mermaid
-flowchart
-    A[AudioRecorder\nAudioRecord 采集] -->|audioChannel\nByteArray| B[TranscriptionPipeline]
-    B -->|Silero VAD\n检测语音段| C[Speech Buffer\n预滚缓冲+静音切段]
-    C -->|SpeakerChangeDetector\n声纹滑窗换人检测| D[WhisperWrapper\nASR 转写]
-    D -->|resultChannel\nAudioTextPair| E[SpeakerDiarizationManager\n声纹识别说话人]
-    E -->|RawSpeakerTurn| F[SemanticBuffer\n语义分段批处理]
-    F -->|批次| G[LocalLlmManager\nGemma 2B 润色]
-    G -->|正式稿| H[UI 显示 + TranscriptionFileManager 保存]
+    // ===== 第 4 层：用户界面 =====
+    subgraph cluster_ui {
+        label="用户界面 (UI)";
+        style=filled; color="#9DB8D8"; fillcolor="#F4F8FC";
+        fontsize=11; fontname="Helvetica-Bold";
+        node [fillcolor="#E8EEF7", color="#5B7AA8"];
+        ui_main  [label="MainActivity\n(Compose 导航)"];
+        ui_set   [label="SettingsScreen\n(模型/音频源设置)"];
+        ui_state [label="TranscriptionState\n(状态单例 Flow)"];
+    }
+
+    // ===== 第 3 层：本应用封装（仅核心推理/模型封装）=====
+    subgraph cluster_app {
+        label="本应用封装 (App Wrappers)";
+        style=filled; color="#8FB589"; fillcolor="#F1F8EF";
+        fontsize=11; fontname="Helvetica-Bold";
+        node [fillcolor="#DCEFD6", color="#5E8A55"];
+        svc   [label="TranscriptionService\n(前台服务/编排)"];
+        vad   [label="SileroVadWrapper"];
+        asr   [label="WhisperWrapper"];
+        diar  [label="SpeakerDiarization\nManager (含 SCD)"];
+        llm   [label="LocalLlmManager"];
+        model [label="ModelManager\n(下载/解压)"];
+        file  [label="Transcription\nFileManager"];
+    }
+
+    // ===== 第 2 层：技术框架 =====
+    subgraph cluster_fw {
+        label="技术框架 (Frameworks)";
+        style=filled; color="#C9A85E"; fillcolor="#FCF7EC";
+        fontsize=11; fontname="Helvetica-Bold";
+        node [fillcolor="#F6E6C2", color="#B5892E"];
+        ort   [label="ONNX Runtime\n(VAD)"];
+        so    [label="sherpa-onnx\n(ASR + 说话人)"];
+        litert[label="LiteRT LM\n(LLM)"];
+        zip   [label="Apache Commons\nCompress"];
+    }
+
+    // ===== 第 1 层：模型 =====
+    subgraph cluster_model {
+        label="模型 (Models)";
+        style=filled; color="#B57070"; fillcolor="#FCF1F1";
+        fontsize=11; fontname="Helvetica-Bold";
+        node [fillcolor="#F3D6D6", color="#A14B4B"];
+        m_vad [label="silero_vad.onnx"];
+        m_asr [label="Whisper /\nSenseVoice"];
+        m_spk [label="ECAPA-TDNN"];
+        m_llm [label="MiniCPM5 1B"];
+    }
+
+    // ---- 依赖 / 调度关系（上方框依赖/调度下方框）----
+    ui_main  -> svc;
+    ui_main  -> ui_state;
+    ui_set   -> ui_state;
+    ui_set   -> model;
+
+    svc -> vad;  svc -> asr;  svc -> diar;  svc -> llm;  svc -> model;  svc -> file;
+
+    vad   -> ort    [label=" 推理 "];
+    asr   -> so     [label=" 识别 "];
+    diar  -> so     [label=" 声纹 "];
+    llm   -> litert [label=" 推理 "];
+    model -> zip    [label=" 解压 "];
+
+    ort    -> m_vad [label=" 加载 "];
+    so     -> m_asr [label=" 加载 "];
+    so     -> m_spk [label=" 加载 "];
+    litert -> m_llm [label=" 加载 "];
+
+    file -> ui_state [style="dotted", label=" 推送 "];
+}
 ```
+
 
 ### 2.3 关键模块
 
-| 文件 | 职责 |
-| :--- | :--- |
-| `MainActivity.kt` | 入口 Activity，Compose 导航（转写页 / 设置页）。仅负责 UI 渲染与订阅 `TranscriptionState`，不再持有任何 Native 资源或录音协程 |
-| `TranscriptionApplication.kt` | `Application` 子类，持有跨 Activity / Service 共享的 `ModelManager` 与 `TranscriptionFileManager` 单例，并创建前台服务通知渠道 |
-| `TranscriptionService.kt` | **前台服务**：承载整条转写管线（AudioRecorder → VAD → Whisper → 说话人分离 → 语义分段 → LLM 润色）。通过 `startForeground` + `FOREGROUND_SERVICE_TYPE_MICROPHONE` 提升为前台服务，使应用切到后台 / Activity 销毁后录音与转写仍持续运行 |
-| `TranscriptionState.kt` | 跨 Activity / Service 共享的状态单例（Flow）：服务把实时转写、正式稿、录音状态、音量推送到这里，Activity 仅订阅渲染 |
-| `AudioRecorder.kt` | 通过 `AudioRecord` 采集麦克风音频，按帧写入 `audioChannel` |
-| `AudioUtils.kt` | 音频格式转换工具（如 `ByteArray` → `FloatArray` 归一化） |
-| `SileroVadWrapper.kt` | 基于 ONNX Runtime 加载 `silero_vad.onnx`，逐帧输出语音概率，维护 V4 隐藏状态 |
-| `TranscriptionPipeline.kt` | 管线核心：VAD 状态机（IDLE/RECORDING）、预滚缓冲、静音切段、SCD 触发切段 |
-| `SpeakerChangeDetector.kt` | 声纹滑窗换人检测（SCD），复用 Diarization 的 extractor，按滑动步长节流 |
-| `WhisperWrapper.kt` | 基于 sherpa-onnx 的 `OfflineRecognizer`，内容驱动识别 Whisper（双 onnx）或 SenseVoice（单 onnx） |
-| `SpeakerDiarizationManager.kt` | 加载 ECAPA-TDNN 模型，提取声纹 embedding，按余弦相似度聚类说话人 |
-| `SemanticBuffer.kt` | 累积说话人轮次，按「说话人切换 / 明显停顿 / 超长字符」边界切批 |
-| `LocalLlmManager.kt` | 加载 Gemma 2B（LiteRT LM），对批次做语义分段与标点润色；GPU 失败自动回退 CPU |
-| `ModelManager.kt` | 模型元数据、应用内下载（`.tar.bz2`）、解压（Apache Commons Compress）、状态管理 |
-| `TranscriptionFileManager.kt` | 转写文本保存（私有文件 / 用户指定目录），原始稿与正式稿分别落盘，含临时文件迁移 |
-| `SettingsScreen.kt` | 设置页：选择 ASR / 说话人 / LLM 模型、音频源、下载链接、导入与删除 |
-| `Constants.kt` | 全局参数（采样率、帧长、各类阈值） |
-| `VadState.kt` | VAD 状态枚举 |
+以 2.2 中绿色「本应用封装」框为单元，下表列出各模块的实现文件与职责：
+
+| 模块（2.2 绿色框） | 实现文件 | 职责 |
+| :--- | :--- | :--- |
+| `TranscriptionService`（前台服务 / 编排） | `TranscriptionService.kt`、`TranscriptionPipeline.kt`、`SemanticBuffer.kt` | 前台服务承载整条转写管线；维护 VAD 状态机、预滚缓冲、静音 / SCD 切段，按说话人 / 停顿边界切批；通过 `TranscriptionState` 推送实时结果与正式稿 |
+| `SileroVadWrapper` | `SileroVadWrapper.kt` | 基于 ONNX Runtime 加载 `silero_vad.onnx`，逐帧输出语音概率，维护 V4 隐藏状态 |
+| `WhisperWrapper` | `WhisperWrapper.kt` | 基于 sherpa-onnx 的 `OfflineRecognizer`，内容驱动识别 Whisper（双 onnx）或 SenseVoice（单 onnx） |
+| `SpeakerDiarizationManager`（含 SCD） | `SpeakerDiarizationManager.kt`、`SpeakerChangeDetector.kt` | 加载 ECAPA-TDNN 提取声纹 embedding 并聚类说话人；SCD 滑窗换人检测，复用 extractor 按 200ms 步长节流 |
+| `LocalLlmManager` | `LocalLlmManager.kt` | 加载 MiniCPM5 1B（LiteRT LM），对批次做语义分段与标点润色；GPU 失败自动回退 CPU |
+| `ModelManager`（下载 / 解压） | `ModelManager.kt` | 模型元数据、应用内下载（`.tar.bz2`）、解压（Apache Commons Compress）、状态管理 |
+| `TranscriptionFileManager` | `TranscriptionFileManager.kt` | 转写文本保存（私有文件 / 用户指定目录），原始稿与正式稿分别落盘，含临时文件迁移 |
+
+> 用户界面（2.2 蓝色框）由 `MainActivity.kt`（Compose 导航）、`SettingsScreen.kt`（模型 / 音频源设置）、`TranscriptionState.kt`（跨组件共享的状态单例 Flow）组成；`TranscriptionApplication.kt` 持有 `ModelManager` 与 `TranscriptionFileManager` 单例并创建通知渠道。
 
 ### 2.4 设计要点
 
@@ -131,7 +197,7 @@ flowchart
 | Whisper 系列（Tiny/Base/Small，OpenAI，经 k2-fsa 导出） | MIT License |
 | SenseVoice Small（阿里巴巴 FunASR） | Apache License 2.0 |
 | ECAPA-TDNN 说话人模型（3D-Speaker / CAM++） | 见 k2-fsa 发布页（Apache 2.0 类开源协议） |
-| Gemma 2B（`gemma-2b-it-cpu-int8.tflite`，Google） | **Gemma 使用条款（Gemma Terms of Use）**——非标准开源协议，使用前须遵守 Google 的 Gemma 许可与责任条款 |
+| MiniCPM5 1B | Apache License 2.0  |
 
 ### 4.3 合规提示
 

@@ -1,5 +1,7 @@
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/zeerd/Real-timeTranscription)
 
+[English](README.en.md)
+
 # Real-time Transcription App
 
 一个完全在设备本地（离线）运行的 Android 实时语音转写应用。

@@ -13,7 +13,11 @@ data class AudioTextPair(
     val rawAudio: FloatArray,
     val transcribedText: String,
     // 语音段开始时间（VAD 检测到语音、进入 RECORDING 的时刻），用于计算段间真实停顿
-    val segmentStartTimestampMs: Long = 0L
+    val segmentStartTimestampMs: Long = 0L,
+    // 语音段结束时间（VAD 切出该段的时刻，即真实语音结束时刻），用于计算段间真实停顿。
+    // 注意：必须在切段时记录，而非转写完成后记录，否则会被 Whisper 推理延迟污染，
+    // 导致相邻同说话人段落被误判为「明显停顿」而强制切批。
+    val segmentEndTimestampMs: Long = 0L
 )
 
 class TranscriptionPipeline(
@@ -115,7 +119,8 @@ class TranscriptionPipeline(
                                     val audioData = speechBuffer.toFloatArray()
                                     // whisperWrapper.dumpWave(audioData, "scd")
                                     val text = whisperWrapper.transcribe(audioData)
-                                    resultChannel.send(AudioTextPair(audioData, text, segmentStartTimestampMs))
+                                    val segEnd = System.currentTimeMillis()
+                                    resultChannel.send(AudioTextPair(audioData, text, segmentStartTimestampMs, segEnd))
                                 } else {
                                     Log.d(TAG, "SCD cut but segment too short (${speechBuffer.size} samples). Discarding.")
                                 }
@@ -139,7 +144,8 @@ class TranscriptionPipeline(
                                 val audioData = speechBuffer.toFloatArray()
                                 // whisperWrapper.dumpWave(audioData, reason.replace(" ", "_"))
                                 val text = whisperWrapper.transcribe(audioData)
-                                resultChannel.send(AudioTextPair(audioData, text, segmentStartTimestampMs))
+                                val segEnd = System.currentTimeMillis()
+                                resultChannel.send(AudioTextPair(audioData, text, segmentStartTimestampMs, segEnd))
                             } else {
                                 Log.d(TAG, "Cut triggered by $reason, but segment too short (${speechBuffer.size} samples). Discarding.")
                             }

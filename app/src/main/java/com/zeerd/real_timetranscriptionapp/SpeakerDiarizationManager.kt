@@ -14,7 +14,7 @@ import kotlinx.coroutines.sync.withLock
 
 data class RawSpeakerTurn(
     val speakerId: String,
-    // 语音段结束时间（解析完成时记录），用于 MAX_CHARS 兜底与日志
+    // 语音段结束时间（VAD 切出该段的真实时刻，即真实语音结束时刻），用于段间真实停顿计算与空闲超时
     val timestampMs: Long,
     // 语音段开始时间（VAD 进入 RECORDING 时记录），用于计算段间真实停顿
     val startTimestampMs: Long,

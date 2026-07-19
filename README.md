@@ -35,88 +35,82 @@
 
 ### 2.2 架构
 
-```dot
-digraph "Architecture" {
-    rankdir=TB;
-    bgcolor="transparent";
-    nodesep=0.3;
-    ranksep=0.7;
-    node [fontname="Helvetica,Arial,sans-serif", fontsize=9,
-          shape=box, style="filled,rounded", penwidth=1.2, margin=0.1];
-    edge [color="#555555", fontsize=8, fontname="Helvetica,Arial,sans-serif",
-          penwidth=1.0, style="dashed", labelangle=0, labeldistance=1.1];
+```mermaid
+flowchart TB
+    %% ===== 第 4 层：用户界面 =====
+    subgraph cluster_ui["用户界面 (UI)"]
+        direction TB
+        ui_main["MainActivity<br/>(Compose 导航)"]
+        ui_set["SettingsScreen<br/>(模型/音频源设置)"]
+        ui_state["TranscriptionState<br/>(状态单例 Flow)"]
+    end
 
-    // ===== 第 4 层：用户界面 =====
-    subgraph cluster_ui {
-        label="用户界面 (UI)";
-        style=filled; color="#9DB8D8"; fillcolor="#F4F8FC";
-        fontsize=11; fontname="Helvetica-Bold";
-        node [fillcolor="#E8EEF7", color="#5B7AA8"];
-        ui_main  [label="MainActivity\n(Compose 导航)"];
-        ui_set   [label="SettingsScreen\n(模型/音频源设置)"];
-        ui_state [label="TranscriptionState\n(状态单例 Flow)"];
-    }
+    %% ===== 第 3 层：本应用封装（仅核心推理/模型封装）=====
+    subgraph cluster_app["本应用封装 (App Wrappers)"]
+        direction TB
+        svc["TranscriptionService<br/>(前台服务/编排)"]
+        vad["SileroVadWrapper"]
+        asr["WhisperWrapper"]
+        diar["SpeakerDiarization<br/>Manager (含 SCD)"]
+        llm["LocalLlmManager"]
+        model["ModelManager<br/>(下载/解压)"]
+        file["Transcription<br/>FileManager"]
+    end
 
-    // ===== 第 3 层：本应用封装（仅核心推理/模型封装）=====
-    subgraph cluster_app {
-        label="本应用封装 (App Wrappers)";
-        style=filled; color="#8FB589"; fillcolor="#F1F8EF";
-        fontsize=11; fontname="Helvetica-Bold";
-        node [fillcolor="#DCEFD6", color="#5E8A55"];
-        svc   [label="TranscriptionService\n(前台服务/编排)"];
-        vad   [label="SileroVadWrapper"];
-        asr   [label="WhisperWrapper"];
-        diar  [label="SpeakerDiarization\nManager (含 SCD)"];
-        llm   [label="LocalLlmManager"];
-        model [label="ModelManager\n(下载/解压)"];
-        file  [label="Transcription\nFileManager"];
-    }
+    %% ===== 第 2 层：技术框架 =====
+    subgraph cluster_fw["技术框架 (Frameworks)"]
+        direction TB
+        ort["ONNX Runtime<br/>(VAD)"]
+        so["sherpa-onnx<br/>(ASR + 说话人)"]
+        litert["LiteRT LM<br/>(LLM)"]
+        zip["Apache Commons<br/>Compress"]
+    end
 
-    // ===== 第 2 层：技术框架 =====
-    subgraph cluster_fw {
-        label="技术框架 (Frameworks)";
-        style=filled; color="#C9A85E"; fillcolor="#FCF7EC";
-        fontsize=11; fontname="Helvetica-Bold";
-        node [fillcolor="#F6E6C2", color="#B5892E"];
-        ort   [label="ONNX Runtime\n(VAD)"];
-        so    [label="sherpa-onnx\n(ASR + 说话人)"];
-        litert[label="LiteRT LM\n(LLM)"];
-        zip   [label="Apache Commons\nCompress"];
-    }
+    %% ===== 第 1 层：模型 =====
+    subgraph cluster_model["模型 (Models)"]
+        direction TB
+        m_vad["silero_vad.onnx"]
+        m_asr["Whisper /<br/>SenseVoice"]
+        m_spk["ECAPA-TDNN"]
+        m_llm["MiniCPM5 1B"]
+    end
 
-    // ===== 第 1 层：模型 =====
-    subgraph cluster_model {
-        label="模型 (Models)";
-        style=filled; color="#B57070"; fillcolor="#FCF1F1";
-        fontsize=11; fontname="Helvetica-Bold";
-        node [fillcolor="#F3D6D6", color="#A14B4B"];
-        m_vad [label="silero_vad.onnx"];
-        m_asr [label="Whisper /\nSenseVoice"];
-        m_spk [label="ECAPA-TDNN"];
-        m_llm [label="MiniCPM5 1B"];
-    }
+    %% ---- 依赖 / 调度关系（上方框依赖/调度下方框）----
+    ui_main --> svc
+    ui_main --> ui_state
+    ui_set --> ui_state
+    ui_set --> model
 
-    // ---- 依赖 / 调度关系（上方框依赖/调度下方框）----
-    ui_main  -> svc;
-    ui_main  -> ui_state;
-    ui_set   -> ui_state;
-    ui_set   -> model;
+    svc --> vad
+    svc --> asr
+    svc --> diar
+    svc --> llm
+    svc --> model
+    svc --> file
 
-    svc -> vad;  svc -> asr;  svc -> diar;  svc -> llm;  svc -> model;  svc -> file;
+    vad -->|推理| ort
+    asr -->|识别| so
+    diar -->|声纹| so
+    llm -->|推理| litert
+    model -->|解压| zip
 
-    vad   -> ort    [label=" 推理 "];
-    asr   -> so     [label=" 识别 "];
-    diar  -> so     [label=" 声纹 "];
-    llm   -> litert [label=" 推理 "];
-    model -> zip    [label=" 解压 "];
+    ort -->|加载| m_vad
+    so -->|加载| m_asr
+    so -->|加载| m_spk
+    litert -->|加载| m_llm
 
-    ort    -> m_vad [label=" 加载 "];
-    so     -> m_asr [label=" 加载 "];
-    so     -> m_spk [label=" 加载 "];
-    litert -> m_llm [label=" 加载 "];
+    file -.->|推送| ui_state
 
-    file -> ui_state [style="dotted", label=" 推送 "];
-}
+    %% ---- 配色（近似原 dot 图）----
+    classDef ui fill:#E8EEF7,stroke:#5B7AA8,color:#1a1a1a;
+    classDef app fill:#DCEFD6,stroke:#5E8A55,color:#1a1a1a;
+    classDef fw fill:#F6E6C2,stroke:#B5892E,color:#1a1a1a;
+    classDef model fill:#F3D6D6,stroke:#A14B4B,color:#1a1a1a;
+
+    class ui_main,ui_set,ui_state ui;
+    class svc,vad,asr,diar,llm,model,file app;
+    class ort,so,litert,zip fw;
+    class m_vad,m_asr,m_spk,m_llm model;
 ```
 
 
@@ -126,13 +120,13 @@ digraph "Architecture" {
 
 | 模块（2.2 绿色框） | 实现文件 | 职责 |
 | :--- | :--- | :--- |
-| `TranscriptionService`（前台服务 / 编排） | `TranscriptionService.kt`、`TranscriptionPipeline.kt`、`SemanticBuffer.kt` | 前台服务承载整条转写管线；维护 VAD 状态机、预滚缓冲、静音 / SCD 切段，按说话人 / 停顿边界切批；通过 `TranscriptionState` 推送实时结果与正式稿 |
-| `SileroVadWrapper` | `SileroVadWrapper.kt` | 基于 ONNX Runtime 加载 `silero_vad.onnx`，逐帧输出语音概率，维护 V4 隐藏状态 |
-| `WhisperWrapper` | `WhisperWrapper.kt` | 基于 sherpa-onnx 的 `OfflineRecognizer`，内容驱动识别 Whisper（双 onnx）或 SenseVoice（单 onnx） |
-| `SpeakerDiarizationManager`（含 SCD） | `SpeakerDiarizationManager.kt`、`SpeakerChangeDetector.kt` | 加载 ECAPA-TDNN 提取声纹 embedding 并聚类说话人；SCD 滑窗换人检测，复用 extractor 按 200ms 步长节流 |
-| `LocalLlmManager` | `LocalLlmManager.kt` | 加载 MiniCPM5 1B（LiteRT LM），对批次做语义分段与标点润色；GPU 失败自动回退 CPU |
-| `ModelManager`（下载 / 解压） | `ModelManager.kt` | 模型元数据、应用内下载（`.tar.bz2`）、解压（Apache Commons Compress）、状态管理 |
-| `TranscriptionFileManager` | `TranscriptionFileManager.kt` | 转写文本保存（私有文件 / 用户指定目录），原始稿与正式稿分别落盘，含临时文件迁移 |
+| `TranscriptionService`（前台服务 / 编排） | `TranscriptionService.kt`、<br/>`TranscriptionPipeline.kt`、<br/> `SemanticBuffer.kt` | **整条流水线的「总指挥」**。它是一个常驻后台的前台服务：即使你切到别的 App 或锁屏，录音和转写也不会停。它负责打开麦克风、把后面几个模块串起来按顺序跑，并判断「一句话说到哪算完、该不该切到下一段」，最后把实时文字推到屏幕上。 |
+| `SileroVadWrapper` | `SileroVadWrapper.kt` | **「现在有人说话吗？」的判断器（语音活动检测 / VAD）**。它一帧一帧地听音频，只回答一个问题：当前这 32 毫秒里到底有没有人在讲话。这样就能把安静的片段丢掉，只把真正有语音的部分交给后面的识别模块，省电也省算力。 |
+| `WhisperWrapper` | `WhisperWrapper.kt` | **「把声音变成文字」的听写员（语音识别 / ASR）**。它接收上面筛出来的语音片段，输出成文字。支持中文、英文、日文、韩文等多语种；具体用哪个模型（Whisper 还是 SenseVoice）由文件夹里实际存在的模型文件自动决定。 |
+| `SpeakerDiarizationManager`（含 SCD） | `SpeakerDiarizationManager.kt`、<br/>`SpeakerChangeDetector.kt` | **「这句话是谁说的？」的辨认器（说话人分离 / Diarization）**。它给每个人的声音提取一个「声纹指纹」并记住，从而把转写结果标注成「说话人 1 / 说话人 2……」。其中的 SCD（换人检测）专门处理两人无缝接话、中间没有停顿的情况，强制把前后两句话分给不同人，避免被误并成一段。 |
+| `LocalLlmManager` | `LocalLlmManager.kt` | **「润色编辑」**。原始识别出来的文字往往没有标点、句子乱断。它用设备端的小模型（MiniCPM5 1B）把零散句子整理成有标点、分段清晰的易读稿。这一步可开关；关掉后只保留原始转写、不加载该模型。 |
+| `ModelManager`（下载 / 解压） | `ModelManager.kt` | **「模型仓库管理员」**。AI 模型体积太大（几十 MB 到上 GB），不能塞进安装包。它负责在设置页里把模型下载下来、解压到位，并记录哪些模型已经装好可用。 |
+| `TranscriptionFileManager` | `TranscriptionFileManager.kt` | **「自动存档」**。转写过程中实时把文字写进文件，关掉 App 也不会丢；原始稿和润色后的正式稿分别存成两个文件，互不覆盖，方便事后对照。 |
 
 > 用户界面（2.2 蓝色框）由 `MainActivity.kt`（Compose 导航）、`SettingsScreen.kt`（模型 / 音频源设置）、`TranscriptionState.kt`（跨组件共享的状态单例 Flow）组成；`TranscriptionApplication.kt` 持有 `ModelManager` 与 `TranscriptionFileManager` 单例并创建通知渠道。
 

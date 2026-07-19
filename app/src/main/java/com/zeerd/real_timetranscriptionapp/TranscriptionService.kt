@@ -285,6 +285,16 @@ class TranscriptionService : Service() {
                         launch(Dispatchers.IO) { fileManager.saveRegularized(named) }
                     }
                 }.launchIn(serviceScope)
+
+                // 订阅语义分段缓冲区的输出：每当 SemanticBuffer 切出一批（同说话人合并后的
+                // 连续语句），就交给 LLM 做润色。这是「分段 → 润色」的接线，之前缺失会导致
+                // 批次被 flush 到无人订阅的 SharedFlow 而丢弃，LLM 永远收不到输入。
+                observeJobs += semanticBuffer.bufferFullFlow.onEach { turns ->
+                    if (turns.isNotEmpty()) {
+                        Log.i(TAG, "[V2_LLM] Received ${turns.size} turns from SemanticBuffer, enqueuing for regularization")
+                        mgr.enqueueRegularization(turns)
+                    }
+                }.launchIn(serviceScope)
             }
 
             if (initialized != null) {
@@ -330,7 +340,7 @@ class TranscriptionService : Service() {
                             TranscriptionState.addTranscription(displayResult)
                             Log.d(TAG, "[UI_MSG] Transcription added: $displayResult")
 
-                            semanticBuffer.addTurn(RawSpeakerTurn(speakerId, System.currentTimeMillis(), pair.segmentStartTimestampMs, result))
+                            semanticBuffer.addTurn(RawSpeakerTurn(speakerId, pair.segmentEndTimestampMs, pair.segmentStartTimestampMs, result))
 
                             launch(Dispatchers.IO) { fileManager.saveTranscription(displayResult) }
                         }

@@ -70,14 +70,20 @@ class SemanticBuffer {
         scheduleIdleFlush()
     }
 
-    // 取消旧任务并启动一个新的空闲超时任务
+    // 取消旧任务并启动一个新的空闲超时任务。
+    // 计时基准是「最后一段的真实结束时刻」(turn.timestampMs = segmentEndTimestampMs)，
+    // 而非收到 turn 的时刻，否则会被 Whisper/diarization 的推理延迟吃掉，
+    // 导致上一段在下一段还没转写完时就被切走，同说话人连续语句无法合并。
     private fun scheduleIdleFlush() {
         idleFlushJob?.cancel()
+        val lastEnd = activeTurns.lastOrNull()?.timestampMs ?: return
+        val elapsedSinceEnd = System.currentTimeMillis() - lastEnd
+        val waitMs = (Constants.BATCH_SPLIT_IDLE_MS - elapsedSinceEnd).coerceAtLeast(0)
         idleFlushJob = scope.launch {
-            delay(Constants.BATCH_SPLIT_PAUSE_MS)
+            delay(waitMs)
             mutex.withLock {
                 if (activeTurns.isNotEmpty()) {
-                    Log.i("SemanticBuffer", "Split reason: IDLE_TIMEOUT (no new turn for ${Constants.BATCH_SPLIT_PAUSE_MS}ms)")
+                    Log.i("SemanticBuffer", "Split reason: IDLE_TIMEOUT (no new turn for ${Constants.BATCH_SPLIT_IDLE_MS}ms after last segment end)")
                     flushLocked()
                 }
             }

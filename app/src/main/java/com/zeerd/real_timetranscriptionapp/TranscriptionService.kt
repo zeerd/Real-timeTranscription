@@ -23,6 +23,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -30,10 +31,11 @@ import java.io.File
  * 前台转写服务。
  *
  * 把原本跑在 MainActivity.lifecycleScope 里的整条管线（AudioRecorder → VAD → Whisper →
- * 说话人分离 → 语义分段 → LLM 润色）搬到这里，用 [startForeground] 提升为前台服务，
+ * 说话人分离 → 同说话人临近内容合并）搬到这里，用 [startForeground] 提升为前台服务，
  * 这样即使 Activity 被销毁 / 应用切到后台，录音与转写仍持续运行。
  *
  * 与 UI 的通信全部走 [TranscriptionState] 单例（Flow），服务不持有任何 View 引用。
+ * 停止采集后，可调用 LLM 对本次会话做总结（summarization），该能力独立于实时转写管线。
  */
 class TranscriptionService : Service() {
     private val TAG = "TranscriptionService"
@@ -167,8 +169,7 @@ class TranscriptionService : Service() {
     private fun restoreHistoryToUi() {
         serviceScope.launch {
             val raw = fileManager.getHistory()
-            val formal = fileManager.getFormalHistory()
-            TranscriptionState.restoreHistory(raw, formal)
+            TranscriptionState.restoreHistory(raw)
         }
     }
 
@@ -176,11 +177,10 @@ class TranscriptionService : Service() {
 
     private fun checkAndStartPipeline() {
         val selectedId = modelManager.getSelectedModelId()
-        val selectedLlmId = modelManager.getSelectedLlmModelId()
         val selectedAudioSource = modelManager.getAudioSource()
         val isReady = modelManager.isModelReady(selectedId)
 
-        Log.i(TAG, "Pipeline Sync Check: whisper=$selectedId, llm=$selectedLlmId, audioSource=$selectedAudioSource, runningModel=$currentModelId, starting=$isPipelineStarting, ready=$isReady")
+        Log.i(TAG, "Pipeline Sync Check: whisper=$selectedId, audioSource=$selectedAudioSource, runningModel=$currentModelId, starting=$isPipelineStarting, ready=$isReady")
 
         if (!isReady) {
             Log.w(TAG, "Pipeline not ready (no ASR model selected/ready), skipping start")
@@ -269,14 +269,8 @@ class TranscriptionService : Service() {
                         Log.w(TAG, "[V2_PIPELINE] Speaker model NOT found. Diarization disabled.")
                     }
 
-                    val selectedLlmId = modelManager.getSelectedLlmModelId()
-                    val llmModelDir = modelManager.getModelDir(selectedLlmId)
-                    if (modelManager.isLlmPolishingEnabled() && modelManager.isModelReady(selectedLlmId)) {
-                        Log.i(TAG, "[V2_PIPELINE] LLM model $selectedLlmId is ready, enabling Regularization")
-                        llmManager = LocalLlmManager(this@TranscriptionService, llmModelDir)
-                    } else {
-                        Log.w(TAG, "[V2_PIPELINE] LLM Regularization disabled (enabled=${modelManager.isLlmPolishingEnabled()}, modelReady=${modelManager.isModelReady(selectedLlmId)}).")
-                    }
+                    // 注意：实时 LLM 润色已移除（SenseVoice 识别能力足够强，改用算法合并同说话人临近内容）。
+                    // LLM 仅用于停止采集后的「总结」(summarization)，在 runSummary 中按需初始化。
 
                     vadWrapper = vad
                     whisperWrapper = whisper
@@ -292,28 +286,19 @@ class TranscriptionService : Service() {
                 }
             }
 
-            // LLM 正式稿收集（replay=1，UI 重连也能拿到最近结果）
-            llmManager?.let { mgr ->
-                observeJobs += mgr.regularizedBlocks.onEach { text ->
-                    if (text.isNotBlank()) {
-                        // 把正式稿里的 [Speaker N] 标签替换为用户命名（未命名则保持原样）
-                        val named = SpeakerNameStore.substituteLabels(text)
-                        TranscriptionState.addRegularized(named)
-                        Log.i(TAG, "[V2_UI] New regularized block added")
-                        launch(Dispatchers.IO) { fileManager.saveRegularized(named) }
+            // 同说话人临近内容合并：SemanticBuffer 按「说话人切换 / 明显停顿 / 超长 /
+            // 空闲超时」切出一批（同一说话人临近的连续语句），这里把每批直接合并成
+            // 一段「[说话人]: 文本」推给 UI / 落盘（替代原 LLM 实时润色，算法不变）。
+            observeJobs += semanticBuffer.bufferFullFlow.onEach { turns ->
+                if (turns.isNotEmpty()) {
+                    val merged = mergeTurnsToText(turns)
+                    if (merged.isNotBlank()) {
+                        TranscriptionState.addTranscription(merged)
+                        Log.i(TAG, "[V2_UI] New merged block added (${turns.size} turns)")
+                        launch(Dispatchers.IO) { fileManager.saveTranscription(merged) }
                     }
-                }.launchIn(serviceScope)
-
-                // 订阅语义分段缓冲区的输出：每当 SemanticBuffer 切出一批（同说话人合并后的
-                // 连续语句），就交给 LLM 做润色。这是「分段 → 润色」的接线，之前缺失会导致
-                // 批次被 flush 到无人订阅的 SharedFlow 而丢弃，LLM 永远收不到输入。
-                observeJobs += semanticBuffer.bufferFullFlow.onEach { turns ->
-                    if (turns.isNotEmpty()) {
-                        Log.i(TAG, "[V2_LLM] Received ${turns.size} turns from SemanticBuffer, enqueuing for regularization")
-                        mgr.enqueueRegularization(turns)
-                    }
-                }.launchIn(serviceScope)
-            }
+                }
+            }.launchIn(serviceScope)
 
             if (initialized != null) {
                 val (vad, whisper) = initialized
@@ -354,14 +339,13 @@ class TranscriptionService : Service() {
                             }
                             // 登记说话人并替换为用户命名（未命名则仍是 "Speaker N"）
                             SpeakerNameStore.register(speakerId)
-                            val displayName = SpeakerNameStore.getDisplayName(speakerId)
-                            val displayResult = "[$displayName]: $result"
-                            TranscriptionState.addTranscription(displayResult)
-                            Log.d(TAG, "[UI_MSG] Transcription added: $displayResult")
 
+                            // 交给分段器：按「说话人切换 / 明显停顿 / 超长 / 空闲超时」做
+                            // 算法切批，切出的批次经 bufferFullFlow 合并成「[说话人]: 文本」
+                            // 后统一推回 UI / 落盘（替代原 LLM 实时润色，分段算法不变）。
+                            // 注意：这里只喂原始 ASR 文本，说话人标签由合并阶段统一拼接，
+                            // 避免逐段展示与合并结果在 UI / 文件里重复出现。
                             semanticBuffer.addTurn(RawSpeakerTurn(speakerId, pair.segmentEndTimestampMs, pair.segmentStartTimestampMs, result))
-
-                            launch(Dispatchers.IO) { fileManager.saveTranscription(displayResult) }
                         }
                     }
                 }
@@ -388,6 +372,9 @@ class TranscriptionService : Service() {
         diarizationManager?.release()
         diarizationManager = null
         // 注意：llmManager 暂不释放，停止后做摘要时可能复用
+        // 先强制把最后一批（若有）送出，再释放分段器，避免最后一段因 idle 任务被取消而丢失
+        runBlocking { semanticBuffer.flushNow() }
+        semanticBuffer.release()
         currentModelId = null
         currentAudioSource = null
         isPipelineStarting = false
@@ -406,6 +393,31 @@ class TranscriptionService : Service() {
     }
 
     /**
+     * 把同一说话人的一批零散转写片段合并成一段连续的「[说话人]: 文本」行。
+     *
+     * 同一说话人的相邻片段用空格连接；说话人切换时换行并以新的 [显示名]: 开头。
+     * 显示名取自 [SpeakerNameStore]（用户命名优先，未命名则保持 Speaker N）。
+     * 这替代了原先依赖 LLM 的实时润色，纯算法、零延迟、无需加载大模型。
+     */
+    private fun mergeTurnsToText(turns: List<RawSpeakerTurn>): String {
+        if (turns.isEmpty()) return ""
+        val sb = StringBuilder()
+        var currentSpeaker: String? = null
+        for (turn in turns) {
+            val displayName = SpeakerNameStore.getDisplayName(turn.speakerId)
+            if (turn.speakerId != currentSpeaker) {
+                if (sb.isNotEmpty()) sb.append("\n")
+                sb.append("[$displayName]: ")
+                currentSpeaker = turn.speakerId
+            } else {
+                sb.append(" ")
+            }
+            sb.append(turn.rawText.trim())
+        }
+        return sb.toString()
+    }
+
+    /**
      * 对本次采集会话的完整转写文本执行 LLM 摘要，并自动保存到文件。
      * 由 UI 在用户确认「停止后总结」时通过 [ACTION_SUMMARIZE] 触发。
      */
@@ -416,8 +428,7 @@ class TranscriptionService : Service() {
             return
         }
         val selectedLlmId = modelManager.getSelectedLlmModelId()
-        // 总结功能独立于「LLM 润色」开关：只要 LLM 模型本身就绪即可，
-        // 不受 isLlmPolishingEnabled() 影响（润色关闭时仍可单独生成摘要）。
+        // 总结功能只需 LLM 模型本身就绪即可（LLM 仅用于停止采集后的总结，不用于实时润色）。
         if (!modelManager.isModelReady(selectedLlmId)) {
             Log.w(TAG, "runSummary: LLM not available (ready=${modelManager.isModelReady(selectedLlmId)})")
             TranscriptionState.postMessage("缺少可用的 LLM 模型，无法生成摘要")
@@ -450,6 +461,7 @@ class TranscriptionService : Service() {
 
             if (summary.isNotBlank()) {
                 val path = fileManager.saveSummary(summary)
+                TranscriptionState.setSummaryResult(summary)
                 TranscriptionState.postMessage("摘要已保存：$path")
                 Log.i(TAG, "[SUMMARY] Saved summary to $path")
             } else {

@@ -555,13 +555,4 @@ class ModelManager(private val context: Context) {
         context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putInt("audio_source", source).apply()
         _settingsChanged.update { it + 1 }
     }
-
-    // LLM 润色开关：默认开启。关闭后管线不再初始化 LLM，也不对原始稿做语义分段润色。
-    fun isLlmPolishingEnabled(): Boolean =
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean("llm_polishing_enabled", true)
-    fun setLlmPolishingEnabled(enabled: Boolean) {
-        Log.i(TAG, "Setting LLM polishing enabled to: $enabled")
-        context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putBoolean("llm_polishing_enabled", enabled).apply()
-        _settingsChanged.update { it + 1 }
-    }
 }

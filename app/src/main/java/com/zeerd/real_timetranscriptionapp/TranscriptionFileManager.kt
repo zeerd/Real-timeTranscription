@@ -17,38 +17,27 @@ import java.util.Locale
 
 class TranscriptionFileManager(private val context: Context) {
     private val TAG = "TranscriptionFileManager"
-    // 用户通过 SAF 选择的目录（树 URI），用于同时保存「原始稿」与「正式稿」
-    private var userSelectedTreeUri: Uri? = null
-    private var selectedDirName: String? = null
-    // 目录内两个文件的 URI（分别保存原始 ASR 结果与 LLM 润色结果）
-    private var rawFileUri: Uri? = null
-    private var formalFileUri: Uri? = null
-    // 内部自动保存（未选择目录时回退），同样区分原始稿与正式稿
+    // 用户通过 SAF 直接选择的保存文件（文档 URI），转写与摘要都写入此文件
+    private var userSelectedFileUri: Uri? = null
+    private var selectedFileName: String? = null
+    // 内部自动保存（未选择文件时回退）
     private val defaultRawFile: File = File(context.filesDir, "autosave_transcription_raw.txt")
-    private val defaultFormalFile: File = File(context.filesDir, "autosave_transcription_formal.txt")
 
-    suspend fun setUserSelectedDir(uri: Uri?) = withContext(Dispatchers.IO) {
-        Log.d(TAG, "setUserSelectedDir called: ${if (uri != null) uri.toString() else "null (revert to internal storage)"}")
-        userSelectedTreeUri = uri
+    suspend fun setUserSelectedFile(uri: Uri?) = withContext(Dispatchers.IO) {
+        Log.d(TAG, "setUserSelectedFile called: ${if (uri != null) uri.toString() else "null (revert to internal storage)"}")
+        userSelectedFileUri = uri
         if (uri != null) {
-            selectedDirName = getTreeDisplayName(uri)
-            rawFileUri = createFileInDir(uri, "transcription_raw.txt")
-            formalFileUri = createFileInDir(uri, "transcription_formal.txt")
+            selectedFileName = getDisplayName(uri)
             migrateTempToSelected()
         } else {
-            selectedDirName = null
-            rawFileUri = null
-            formalFileUri = null
-            Log.i(TAG, "User cleared selected save dir, reverting to internal autosave")
+            selectedFileName = null
+            Log.i(TAG, "User cleared selected save file, reverting to internal autosave")
         }
     }
 
-    private fun getTreeDisplayName(uri: Uri): String? {
+    private fun getDisplayName(uri: Uri): String? {
         return try {
-            val docUri = DocumentsContract.buildDocumentUriUsingTree(
-                uri, DocumentsContract.getTreeDocumentId(uri)
-            )
-            context.contentResolver.query(docUri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
                 if (cursor.moveToFirst()) {
                     val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                     if (idx != -1) cursor.getString(idx) else null
@@ -59,22 +48,8 @@ class TranscriptionFileManager(private val context: Context) {
         }
     }
 
-    private fun createFileInDir(treeUri: Uri, fileName: String): Uri? {
-        return try {
-            val tree = DocumentFile.fromTreeUri(context, treeUri) ?: return null
-            val existing = tree.findFile(fileName)
-            val doc = existing ?: tree.createFile("text/plain", fileName)
-            doc?.uri
-        } catch (e: Exception) {
-            Log.e(TAG, "createFileInDir($fileName) failed: ${e.message}")
-            null
-        }
-    }
-
     private fun migrateTempToSelected() {
-        migrateSingle(defaultRawFile, rawFileUri, "raw")
-        migrateSingle(defaultFormalFile, formalFileUri, "formal")
-        migrateSummaries()
+        migrateSingle(defaultRawFile, userSelectedFileUri, "raw")
     }
 
     private fun migrateSingle(tempFile: File, targetUri: Uri?, kind: String) {
@@ -85,39 +60,14 @@ class TranscriptionFileManager(private val context: Context) {
                     input.copyTo(output)
                 }
             }
-            Log.d(TAG, "Migrated existing $kind transcriptions to selected dir")
+            Log.d(TAG, "Migrated existing $kind transcriptions to selected file")
         } catch (e: Exception) {
             Log.e(TAG, "Migration of $kind failed: ${e.message}")
         }
     }
 
-    /**
-     * 把内部自动保存的摘要文件（summary_*.txt）一并迁移到用户选择的目录。
-     * 摘要文件名带时间戳，需逐个复制到目标树中（保留原文件名，避免互相覆盖）。
-     */
-    private fun migrateSummaries() {
-        if (userSelectedTreeUri == null) return
-        try {
-            val summaries = context.filesDir.listFiles()
-                ?.filter { it.name.startsWith("summary_") && it.name.endsWith(".txt") }
-                ?: emptyList()
-            if (summaries.isEmpty()) return
-            summaries.forEach { file ->
-                val targetUri = createFileInDir(userSelectedTreeUri!!, file.name)
-                if (targetUri != null) {
-                    context.contentResolver.openOutputStream(targetUri)?.use { output ->
-                        FileInputStream(file).use { input -> input.copyTo(output) }
-                    }
-                    Log.d(TAG, "Migrated summary ${file.name} to selected dir")
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Migration of summaries failed: ${e.message}")
-        }
-    }
-
     private suspend fun appendEntry(targetFile: File?, targetUri: Uri?, entry: String) {
-        // 优先写入用户选择的目录文件
+        // 优先写入用户选择的文件
         if (targetUri != null) {
             try {
                 context.contentResolver.openOutputStream(targetUri, "wa")?.use {
@@ -125,7 +75,7 @@ class TranscriptionFileManager(private val context: Context) {
                 }
                 return
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to save to user dir file: ${e.message}")
+                Log.e(TAG, "Failed to save to user file: ${e.message}")
             }
         }
         // 回退到内部自动保存文件
@@ -138,61 +88,29 @@ class TranscriptionFileManager(private val context: Context) {
         }
     }
 
-    // 保存原始 ASR 结果（LLM 润色之前）
+    // 保存转写结果（已按同说话人合并）
     suspend fun saveTranscription(text: String) = withContext(Dispatchers.IO) {
         val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
         val entry = "[$timestamp] $text\n\n"
         Log.d(TAG, "saveTranscription called (${text.length} chars)")
-        appendEntry(defaultRawFile, rawFileUri, entry)
-    }
-
-    // 保存 LLM 润色后的正式稿（与原始 ASR 结果分开保存）
-    suspend fun saveRegularized(text: String) = withContext(Dispatchers.IO) {
-        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
-        val entry = "[$timestamp] $text\n\n"
-        Log.d(TAG, "saveRegularized called (${text.length} chars)")
-        appendEntry(defaultFormalFile, formalFileUri, entry)
+        appendEntry(defaultRawFile, userSelectedFileUri, entry)
     }
 
     /**
-     * 保存一次采集会话的 LLM 摘要到独立文件（summary.txt / summary_<时间戳>.txt）。
-     * 与原始稿、正式稿分开，便于用户单独查看每次会话的总结。
+     * 保存一次采集会话的 LLM 摘要，追加到同一个转写文件末尾（与原始稿合并，不再单开文件）。
      *
      * @return 实际写入的文件路径（内部回退）或 URI 描述，便于 UI 提示
      */
     suspend fun saveSummary(text: String): String = withContext(Dispatchers.IO) {
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-        val header = "===== 摘要 (${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())}) =====\n\n"
-        val content = header + text + "\n\n"
-
-        // 优先写入用户选择的目录（带时间戳的独立文件名，避免覆盖）
-        if (userSelectedTreeUri != null) {
-            try {
-                val tree = DocumentFile.fromTreeUri(context, userSelectedTreeUri!!)
-                val doc = tree?.createFile("text/plain", "summary_$timestamp")
-                doc?.uri?.let { uri ->
-                    context.contentResolver.openOutputStream(uri)?.use { it.write(content.toByteArray()) }
-                    Log.i(TAG, "saveSummary saved to user dir: $uri")
-                    return@withContext uri.toString()
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "saveSummary to user dir failed: ${e.message}")
-            }
-        }
-
-        // 回退到内部存储（带时间戳，避免多次摘要互相覆盖）
-        val file = File(context.filesDir, "summary_$timestamp.txt")
-        try {
-            file.writeText(content)
-            Log.i(TAG, "saveSummary saved to internal: ${file.absolutePath}")
-        } catch (e: Exception) {
-            Log.e(TAG, "saveSummary to internal failed: ${e.message}")
-        }
-        file.absolutePath
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        val entry = "\n===== 摘要 ($timestamp) =====\n\n$text\n\n"
+        Log.d(TAG, "saveSummary called (${text.length} chars)")
+        appendEntry(defaultRawFile, userSelectedFileUri, entry)
+        userSelectedFileUri?.toString() ?: defaultRawFile.absolutePath
     }
     
     fun getCurrentSaveLocation(): String {
-        return selectedDirName ?: "Internal Storage (autosave_transcription_*.txt)"
+        return selectedFileName ?: "Internal Storage (autosave_transcription_raw.txt)"
     }
 
     /**
@@ -202,8 +120,7 @@ class TranscriptionFileManager(private val context: Context) {
     suspend fun clearAutosaveHistory() = withContext(Dispatchers.IO) {
         try {
             defaultRawFile.writeText("")
-            defaultFormalFile.writeText("")
-            Log.i(TAG, "Cleared autosave history: ${defaultRawFile.absolutePath}, ${defaultFormalFile.absolutePath}")
+            Log.i(TAG, "Cleared autosave history: ${defaultRawFile.absolutePath}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to clear autosave history: ${e.message}")
         }
@@ -218,20 +135,6 @@ class TranscriptionFileManager(private val context: Context) {
                 .reversed()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to read history: ${e.message}")
-            emptyList()
-        }
-    }
-
-    // 读取内部自动保存的正式稿历史（用于重启后恢复「正式稿」标签页）
-    suspend fun getFormalHistory(): List<String> = withContext(Dispatchers.IO) {
-        if (!defaultFormalFile.exists()) return@withContext emptyList()
-        try {
-            defaultFormalFile.readLines()
-                .filter { it.isNotBlank() }
-                .takeLast(50)
-                .reversed()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to read formal history: ${e.message}")
             emptyList()
         }
     }

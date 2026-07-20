@@ -6,6 +6,9 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.content.res.Configuration
 import android.util.Log
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -18,6 +21,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Save
@@ -49,7 +53,6 @@ class MainActivity : ComponentActivity() {
     // 注意：管线已迁移到 TranscriptionService（前台服务），Activity 不再持有任何
     // Native 资源或录音协程。这里只保留 UI 状态，全部来自 TranscriptionState 单例。
     private val transcriptions = mutableStateListOf<String>()
-    private val regularizedTranscriptions = mutableStateListOf<String>()
     private val isRecording = mutableStateOf(false)
     private val isCapturing = mutableStateOf(false)
     private val summarizing = mutableStateOf(false)
@@ -57,6 +60,8 @@ class MainActivity : ComponentActivity() {
     private val saveLocationDescription = mutableStateOf("")
     // 停止采集后，服务推送的待总结文本；非空时弹出「是否总结」对话框
     private val pendingSummaryText = mutableStateOf<String?>(null)
+    // 最近一次生成的 LLM 总结文本；非空时在界面顶部展示
+    private val summaryResult = mutableStateOf<String?>(null)
 
     private lateinit var app: TranscriptionApplication
 
@@ -89,23 +94,23 @@ class MainActivity : ComponentActivity() {
 
                 NavHost(navController = navController, startDestination = "transcription") {
                     composable("transcription") {
-                        val openDocumentTreeLauncher = rememberLauncherForActivityResult(
-                            contract = ActivityResultContracts.OpenDocumentTree()
+                        val createDocumentLauncher = rememberLauncherForActivityResult(
+                            contract = ActivityResultContracts.CreateDocument("text/plain")
                         ) { uri ->
                             if (uri != null) {
-                                Log.d(TAG, "[USER_ACTION] User selected a save directory via picker: $uri")
-                                // 持久化目录访问权限，避免后续写入被系统拒绝
+                                Log.d(TAG, "[USER_ACTION] User created a save file via picker: $uri")
+                                // 持久化文件访问权限，避免后续写入被系统拒绝
                                 contentResolver.takePersistableUriPermission(
                                     uri,
                                     Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                                 )
                                 lifecycleScope.launch {
-                                    app.fileManager.setUserSelectedDir(uri)
+                                    app.fileManager.setUserSelectedFile(uri)
                                     saveLocationDescription.value = app.fileManager.getCurrentSaveLocation()
-                                    Log.d(TAG, "User selected save dir: $uri")
+                                    Log.d(TAG, "User selected save file: $uri")
                                 }
                             } else {
-                                Log.d(TAG, "[USER_ACTION] User cancelled save-dir picker (no URI returned)")
+                                Log.d(TAG, "[USER_ACTION] User cancelled save-file picker (no URI returned)")
                             }
                         }
 
@@ -124,8 +129,9 @@ class MainActivity : ComponentActivity() {
                                     }
                                     Spacer(modifier = Modifier.height(16.dp))
                                     FloatingActionButton(onClick = {
-                                        Log.d(TAG, "[USER_ACTION] Opening save-dir picker")
-                                        openDocumentTreeLauncher.launch(null)
+                                        Log.d(TAG, "[USER_ACTION] Opening save-file picker")
+                                        val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+                                        createDocumentLauncher.launch("transcription_$ts.txt")
                                     }) {
                                         Icon(Icons.Default.Save, contentDescription = stringResource(R.string.saving_to))
                                     }
@@ -134,15 +140,17 @@ class MainActivity : ComponentActivity() {
                         ) { innerPadding ->
                             TranscriptionScreen(
                                 transcriptions = transcriptions,
-                                regularizedTranscriptions = regularizedTranscriptions,
                                 isRecording = isRecording.value,
                                 isCapturing = isCapturing.value,
                                 summarizing = summarizing.value,
                                 pendingSummaryText = pendingSummaryText.value,
-                                onDismissSummaryDialog = { pendingSummaryText.value = null },
+                                summaryResult = summaryResult.value,
+                                onDismissSummaryDialog = {
+                                    pendingSummaryText.value = null
+                                    summaryResult.value = null
+                                },
                                 volumeLevel = volumeLevel.value,
                                 saveLocation = saveLocationDescription.value,
-                                llmPolishingEnabled = app.modelManager.isLlmPolishingEnabled(),
                                 onStartCapture = {
                                     Log.d(TAG, "[USER_ACTION] Start capture button pressed")
                                     TranscriptionService.startCapture(this@MainActivity)
@@ -161,7 +169,6 @@ class MainActivity : ComponentActivity() {
                                         app.fileManager.clearAutosaveHistory()
                                         withContext(Dispatchers.Main) {
                                             transcriptions.clear()
-                                            regularizedTranscriptions.clear()
                                         }
                                     }
                                 },
@@ -190,12 +197,6 @@ class MainActivity : ComponentActivity() {
             }
         }
         lifecycleScope.launch {
-            TranscriptionState.regularizedTranscriptions.collect { list ->
-                regularizedTranscriptions.clear()
-                regularizedTranscriptions.addAll(list)
-            }
-        }
-        lifecycleScope.launch {
             TranscriptionState.isRecording.collect { isRecording.value = it }
         }
         lifecycleScope.launch {
@@ -207,6 +208,11 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             TranscriptionState.pendingSummary.collect { text ->
                 pendingSummaryText.value = text
+            }
+        }
+        lifecycleScope.launch {
+            TranscriptionState.summaryResult.collect { text ->
+                summaryResult.value = text
             }
         }
         lifecycleScope.launch {
@@ -257,24 +263,20 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun TranscriptionScreen(
     transcriptions: List<String>,
-    regularizedTranscriptions: List<String>,
     isRecording: Boolean,
     isCapturing: Boolean,
     summarizing: Boolean,
     pendingSummaryText: String?,
+    summaryResult: String?,
     onDismissSummaryDialog: () -> Unit,
     volumeLevel: Float,
     saveLocation: String,
-    llmPolishingEnabled: Boolean,
     onStartCapture: () -> Unit,
     onStopCapture: () -> Unit,
     onConfirmSummary: (String) -> Unit,
     onResetHistory: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    // 默认标签页：LLM 润色开启时显示「正式稿」(1)，关闭时显示「实时流」(0)
-    var selectedTab by remember { mutableIntStateOf(if (llmPolishingEnabled) 1 else 0) }
-    val tabs = listOf(stringResource(R.string.tab_raw), stringResource(R.string.tab_formal))
     var showResetDialog by remember { mutableStateOf(false) }
     var showSpeakersDialog by remember { mutableStateOf(false) }
 
@@ -373,19 +375,6 @@ fun TranscriptionScreen(
             }
         }
         
-        SecondaryTabRow(selectedTabIndex = selectedTab, modifier = Modifier.padding(vertical = 8.dp)) {
-            tabs.forEachIndexed { index, title ->
-                Tab(
-                    selected = selectedTab == index,
-                    onClick = {
-                        Log.d(TAG, "[USER_ACTION] Switched tab to '$title' (index=$index)")
-                        selectedTab = index
-                    },
-                    text = { Text(title) }
-                )
-            }
-        }
-
         Card(
             modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
@@ -403,7 +392,41 @@ fun TranscriptionScreen(
                 )
             }
         }
-        
+
+        if (summaryResult != null) {
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = stringResource(R.string.summary_title),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer
+                        )
+                        IconButton(
+                            onClick = { onDismissSummaryDialog() },
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = stringResource(R.string.dismiss_summary))
+                        }
+                    }
+                    SelectionContainer {
+                        Text(
+                            text = summaryResult,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer
+                        )
+                    }
+                }
+            }
+        }
+
         StatusCard(isRecording, volumeLevel)
 
         Spacer(modifier = Modifier.height(12.dp))
@@ -423,17 +446,12 @@ fun TranscriptionScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
         
-        val currentList = if (selectedTab == 0) transcriptions else regularizedTranscriptions
-        
         LazyColumn(modifier = Modifier.weight(1f)) {
-            items(currentList) { text ->
+            items(transcriptions) { text ->
                 SelectionContainer {
                     Card(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (selectedTab == 1) MaterialTheme.colorScheme.primaryContainer 
-                                             else MaterialTheme.colorScheme.surfaceVariant
-                        )
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
                     ) {
                         Text(text = text, modifier = Modifier.padding(12.dp))
                     }
@@ -441,10 +459,10 @@ fun TranscriptionScreen(
             }
         }
         
-        if (currentList.isEmpty()) {
+        if (transcriptions.isEmpty()) {
             Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                 Text(
-                    text = if (selectedTab == 0) stringResource(R.string.speak_to_start) else stringResource(R.string.waiting_llm),
+                    text = stringResource(R.string.speak_to_start),
                     color = Color.Gray
                 )
             }

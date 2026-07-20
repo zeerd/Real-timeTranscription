@@ -48,7 +48,6 @@ fun SettingsScreen(
     val selectedLlmModelId = remember { mutableStateOf(modelManager.getSelectedLlmModelId()) }
     val selectedSpeakerModelId = remember { mutableStateOf(modelManager.getSelectedSpeakerModelId()) }
     val selectedAudioSource = remember { mutableIntStateOf(modelManager.getAudioSource()) }
-    val llmPolishingEnabled = remember { mutableStateOf(modelManager.isLlmPolishingEnabled()) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
@@ -444,41 +443,6 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.bodyMedium,
                     color = Color.Gray
                 )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // LLM 润色开关：关闭后不再对原始稿做语义分段润色，仅保留实时原始转写
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = stringResource(R.string.enable_llm_polishing),
-                                style = MaterialTheme.typography.titleMedium
-                            )
-                            Text(
-                                text = stringResource(R.string.enable_llm_polishing_desc),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color.Gray
-                            )
-                        }
-                        Switch(
-                            checked = llmPolishingEnabled.value,
-                            onCheckedChange = {
-                                Log.i("SettingsScreen", "[USER_ACTION] LLM polishing toggled: $it")
-                                modelManager.setLlmPolishingEnabled(it)
-                                llmPolishingEnabled.value = it
-                            }
-                        )
-                    }
-                }
 
                 Spacer(modifier = Modifier.height(8.dp))
 

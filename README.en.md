@@ -8,7 +8,7 @@ An Android real-time speech transcription app that runs entirely on-device (offl
 
 ## 1. Introduction
 
-This app captures speech in real time through the microphone and completes the full pipeline of **Voice Activity Detection (VAD) → Automatic Speech Recognition (ASR) → Speaker Diarization → Semantic Segmentation & Polishing (LLM)** locally on the phone. The transcription results are displayed on the screen in real time and automatically saved to files.
+This app captures speech in real time through the microphone and completes the full pipeline of **Voice Activity Detection (VAD) → Automatic Speech Recognition (ASR) → Speaker Diarization → Same-Speaker Adjacent Merge** locally on the phone. The transcription results are displayed on the screen in real time and automatically saved to files.
 
 Core features:
 
@@ -16,11 +16,11 @@ Core features:
 - **Multilingual recognition**: Based on the Whisper / SenseVoice model families, supporting Chinese, English, Japanese, Korean, and more.
 - **Speaker Diarization**: Distinguishes different speakers via voiceprints (ECAPA-TDNN), labeling "who said what and when".
 - **Voiceprint sliding-window Speaker Change Detection (SCD)**: Even when two people take turns seamlessly without a pause in between, it can force a segment break, avoiding merging them into one segment.
-- **Local LLM semantic polishing**: Built on the LiteRT framework, it performs semantic segmentation, punctuation, and paragraph organization (formal draft) on fragmented sentences by speaker / pause boundaries.
+- **Same-speaker adjacent merge**: By boundaries such as speaker change, noticeable pause, over-length, and idle timeout, it merges a speaker's fragmented utterances into paragraphs, making the transcript more coherent and readable.
 - **Multiple selectable models**: Tiny / Base / Small / SenseVoice and other accuracy-and-size tiers to fit devices of different performance levels.
 - **In-app model download / manual import**: Large models such as Whisper are not bundled with the APK; they can be downloaded from the settings page or manually copied into private storage.
-- **Real-time saving (two copies)**: Transcription text is automatically saved to the app's private files, and the user can also specify a save directory via the system directory picker. The raw ASR results and the LLM-polished formal draft are **saved as two separate files** that do not overwrite each other.
-- **LLM polishing can be toggled**: The local LLM semantic polishing can be turned off in the settings page. When off, only the real-time raw transcription is kept (the LLM engine is not loaded and no segmentation/polishing is performed).
+- **Real-time saving**: Transcription text is automatically saved to the app's private files, and the user can also specify a save file directly via the system file picker (default filename includes a timestamp for quickly creating non-duplicate files).
+- **Session summarization**: After recording stops, the local LLM can summarize the full transcript of the session and save it to a file.
 
 ---
 
@@ -126,9 +126,9 @@ Taking the green "App Wrappers" box in 2.2 as a unit, the table below lists the 
 | `SileroVadWrapper` | `SileroVadWrapper.kt` | **The "is anyone speaking right now?" detector (Voice Activity Detection / VAD)**. It listens to the audio frame by frame, answering only one question: is there actually someone speaking in this 32-millisecond window? This way it can discard silent segments and only pass the parts with real speech to the recognition module, saving power and compute. |
 | `WhisperWrapper` | `WhisperWrapper.kt` | **The "transcribe sound into text" stenographer (Automatic Speech Recognition / ASR)**. It receives the speech segments filtered above and outputs text. It supports multiple languages including Chinese, English, Japanese, and Korean; which model to use (Whisper or SenseVoice) is automatically determined by the model files actually present in the folder. |
 | `SpeakerDiarizationManager` (with SCD) | `SpeakerDiarizationManager.kt`,<br/>`SpeakerChangeDetector.kt` | **The "who said this?" identifier (Speaker Diarization)**. It extracts a "voiceprint fingerprint" for each person's voice and remembers it, thereby labeling the transcription results as "Speaker 1 / Speaker 2...". The SCD (Speaker Change Detection) within it specifically handles the case where two people take turns seamlessly without a pause, forcing the preceding and following sentences to be assigned to different speakers to avoid being mistakenly merged into one segment. |
-| `LocalLlmManager` | `LocalLlmManager.kt` | **The "polishing editor"**. The raw recognized text often lacks punctuation and has broken sentences. It uses an on-device small model (MiniCPM5 1B) to organize the fragmented sentences into a readable draft with punctuation and clear segmentation. This step can be toggled; when turned off, only the raw transcription is kept and the model is not loaded. |
+| `LocalLlmManager` | `LocalLlmManager.kt` | **The "summarization assistant"**. After recording stops, it uses an on-device small model (MiniCPM5 1B) to generate a summary of the session's full transcript. |
 | `ModelManager` (Download / Extract) | `ModelManager.kt` | **The "model repository manager"**. AI models are too large (tens of MB to over a GB) to be bundled into the installer. It is responsible for downloading the models on the settings page, extracting them to the right place, and recording which models are installed and available. |
-| `TranscriptionFileManager` | `TranscriptionFileManager.kt` | **The "auto-archiver"**. It writes the text into files in real time during transcription, so nothing is lost even if the app is closed; the raw draft and the polished formal draft are stored as two separate files that do not overwrite each other, making it easy to compare later. |
+| `TranscriptionFileManager` | `TranscriptionFileManager.kt` | **The "auto-archiver"**. It writes the text into a file in real time during transcription, so nothing is lost even if the app is closed; the post-stop LLM summary is also written to the same file for easy review. |
 
 > The user interface (blue box in 2.2) consists of `MainActivity.kt` (Compose Navigation), `SettingsScreen.kt` (model / audio source settings), and `TranscriptionState.kt` (a cross-component shared state singleton Flow); `TranscriptionApplication.kt` holds the `ModelManager` and `TranscriptionFileManager` singletons and creates the notification channel.
 
@@ -151,7 +151,7 @@ Taking the green "App Wrappers" box in 2.2 as a unit, the table below lists the 
 | VAD | ONNX Runtime Android (+ Extensions) | 1.27.0 / 0.13.0 |
 | ASR | sherpa-onnx (k2-fsa) | v1.13.4 |
 | Speaker Diarization | sherpa-onnx Speaker Embedding Extractor + ECAPA-TDNN voiceprint model | v1.13.4 |
-| Local LLM Polishing | Google AI Edge LiteRT / LiteRT LM (with GPU backend) | 1.4.2 / 0.14.0 |
+| Local LLM | Google AI Edge LiteRT / LiteRT LM (with GPU backend) | 1.4.2 / 0.14.0 |
 
 ### 3.2 Downloaded Model Resources
 
@@ -166,7 +166,7 @@ The following resources are **not bundled with the APK**; they are obtained via 
 | [`sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2`](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2) | TAR.BZ2 | ~240MB | SenseVoice Small ASR (multilingual) (**recommended**) |
 | [`3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx`](https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx) | ONNX | ~20MB | ECAPA-TDNN Speaker Diarization |
 | [`3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx `](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx ) | ONNX | ~70MB | ECAPA-TDNN Speaker Diarization (**recommended**) |
-| [`minicpm_dynamic_wi8_afp32_gpu_opt.litertlm`](https://huggingface.co/litert-community/MiniCPM5-1B/resolve/main/minicpm_dynamic_wi8_afp32_gpu_opt.litertlm?download=true) ([`modelscope`](https://www.modelscope.cn/models/litert-community/MiniCPM5-1B/files)) | TFLite | ~1.0GB | MiniCPM5 1B local LLM polishing |
+| [`minicpm_dynamic_wi8_afp32_gpu_opt.litertlm`](https://huggingface.co/litert-community/MiniCPM5-1B/resolve/main/minicpm_dynamic_wi8_afp32_gpu_opt.litertlm?download=true) ([`modelscope`](https://www.modelscope.cn/models/litert-community/MiniCPM5-1B/files)) | TFLite | ~1.0GB | MiniCPM5 1B local LLM (used for session summarization) |
 
 > After extraction, Whisper / SenseVoice must contain `[prefix]-encoder.int8.onnx`, `[prefix]-decoder.int8.onnx`, `[prefix]-tokens.txt` (SenseVoice is a single onnx). Models are stored at `/data/user/0/com.zeerd.real_timetranscriptionapp/files/models/[model-id]/`.
 
@@ -216,15 +216,15 @@ The following resources are **not bundled with the APK**; they are obtained via 
 
 ---
 
-## 6. Saved Files (Two Copies on Disk)
+## 6. Saved Files
 
-The transcription results are **saved as two copies simultaneously**, corresponding to the "Live Stream (Raw)" and "Formal Draft (Formal)" tabs on the interface:
+The transcription results are written to a file in real time; the interface shows the "Live Stream (Raw)" tab:
 
-| Content | Internal Private File | File in User-Specified Directory |
+| Content | Internal Private File | User-Specified File |
 | :--- | :--- | :--- |
-| Raw ASR results (before polishing) | `files/autosave_transcription_raw.txt` | `<user directory>/transcription_raw.txt` |
-| LLM-polished formal draft | `files/autosave_transcription_formal.txt` | `<user directory>/transcription_formal.txt` |
+| Real-time transcription (merged by same speaker, with speaker labels) | `files/autosave_transcription_raw.txt` | The file directly chosen by the user via the system file picker (`CreateDocument`) (default name `transcription_<timestamp>.txt`) |
+| LLM summary after stopping recording | Appended to the end of the file | Appended to the end of the file |
 
-- **Default (no directory specified)**: Writes to the two files in the app's private storage; the history of both tabs is automatically restored after a restart.
-- **Specified directory**: Click the save button at the bottom right, and select a folder via the system directory picker (`OpenDocumentTree`); the app persists the read/write permission for that directory and creates `transcription_raw.txt` and `transcription_formal.txt` in it, writing the raw draft and the formal draft respectively.
-- The two files are independent of each other; the formal draft will not overwrite the raw draft, making it easy to compare and verify later.
+- **Default (no file specified)**: Writes to `autosave_transcription_raw.txt` in the app's private storage; history is automatically restored after a restart.
+- **Specified file**: Click the save button at the bottom right, and choose a file directly via the system file picker (`CreateDocument`) (default filename includes a timestamp for quickly creating non-duplicate files); the app persists the read/write permission for that file, and subsequent transcriptions and summaries are written to it.
+- The summary is separated by `===== 摘要 (timestamp) =====` (Summary) for easy review.

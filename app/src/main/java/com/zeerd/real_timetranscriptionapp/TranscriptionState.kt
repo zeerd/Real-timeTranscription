@@ -18,13 +18,9 @@ import kotlinx.coroutines.flow.asStateFlow
  * 且本应用只有一个转写会话，单例足够且最简单。
  */
 object TranscriptionState {
-    // 实时原始转写（ASR 结果，含说话人标签）。新结果插到队首，UI 倒序展示。
+    // 实时转写（ASR 结果，已按同说话人临近内容合并，含说话人标签）。新结果插到队首，UI 倒序展示。
     private val _transcriptions = MutableStateFlow<List<String>>(emptyList())
     val transcriptions = _transcriptions.asStateFlow()
-
-    // LLM 润色后的正式稿。
-    private val _regularizedTranscriptions = MutableStateFlow<List<String>>(emptyList())
-    val regularizedTranscriptions = _regularizedTranscriptions.asStateFlow()
 
     // 是否正在录音（VAD 处于 RECORDING）。
     private val _isRecording = MutableStateFlow(false)
@@ -56,13 +52,13 @@ object TranscriptionState {
     private val _summarizing = MutableStateFlow(false)
     val summarizing = _summarizing.asStateFlow()
 
+    // 最近一次生成的 LLM 总结文本（用于 UI 即时展示）。
+    private val _summaryResult = MutableStateFlow<String?>(null)
+    val summaryResult = _summaryResult.asStateFlow()
+
     fun addTranscription(text: String) {
         // 新结果插到队首
         _transcriptions.value = listOf(text) + _transcriptions.value
-    }
-
-    fun addRegularized(text: String) {
-        _regularizedTranscriptions.value = listOf(text) + _regularizedTranscriptions.value
     }
 
     fun setRecording(active: Boolean) {
@@ -93,15 +89,17 @@ object TranscriptionState {
         _summarizing.value = active
     }
 
+    fun setSummaryResult(text: String?) {
+        _summaryResult.value = text
+    }
+
     // 清空历史（重置按钮调用，同时服务也会清空文件）。
     fun clearUiHistory() {
         _transcriptions.value = emptyList()
-        _regularizedTranscriptions.value = emptyList()
     }
 
     // 服务启动时恢复历史，避免 UI 空白。
-    fun restoreHistory(raw: List<String>, formal: List<String>) {
+    fun restoreHistory(raw: List<String>) {
         _transcriptions.value = raw
-        _regularizedTranscriptions.value = formal
     }
 }

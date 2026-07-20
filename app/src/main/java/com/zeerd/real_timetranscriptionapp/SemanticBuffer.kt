@@ -105,4 +105,16 @@ class SemanticBuffer {
         idleFlushJob?.cancel()
         scope.cancel()
     }
+
+    /**
+     * 立即把当前累积的批次（若有）送出，不等待空闲超时。
+     * 在停止采集时调用，确保最后一段不会因 idle 任务被取消而丢失。
+     * 必须在 [release] 之前调用（release 会取消 scope，导致 emit 失败）。
+     */
+    suspend fun flushNow() {
+        mutex.withLock {
+            idleFlushJob?.cancel()
+            flushLocked()
+        }
+    }
 }

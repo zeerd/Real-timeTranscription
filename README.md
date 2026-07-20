@@ -10,7 +10,7 @@
 
 ## 1. 应用简介
 
-本应用通过麦克风实时采集语音，在手机端本地完成 **语音活动检测（VAD）→ 语音识别（ASR）→ 说话人分离（Diarization）→ 语义分段与润色（LLM）** 的完整链路，并将转写结果实时显示在界面上、自动保存到文件。
+本应用通过麦克风实时采集语音，在手机端本地完成 **语音活动检测（VAD）→ 语音识别（ASR）→ 说话人分离（Diarization）→ 同说话人临近内容合并** 的完整链路，并将转写结果实时显示在界面上、自动保存到文件。
 
 核心特性：
 
@@ -18,11 +18,11 @@
 - **多语种识别**：基于 Whisper / SenseVoice 系列模型，支持中、英、日、韩等多语种。
 - **说话人分离（Diarization）**：通过声纹（ECAPA-TDNN）区分不同说话人，标注「谁在什么时候说了什么」。
 - **声纹滑窗换人检测（SCD）**：即便两人无缝接话、中间没有停顿，也能强制切段，避免被并成一段。
-- **本地 LLM 语义润色**：内置LiteRT框架，按说话人 / 停顿边界对零散句子做语义分段、加标点、整理成段落（正式稿）。
+- **同说话人临近内容合并**：按说话人切换、明显停顿、超长、空闲超时等边界，把同一说话人的零散语句合并成段落，转写结果更连贯易读。
 - **多模型可选**：Tiny / Base / Small / SenseVoice 等多档精度与体积，适配不同性能的设备。
 - **模型应用内下载 / 手动导入**：Whisper 等大模型不随 APK 打包，可在设置页下载或手动拷贝到私有存储。
-- **实时保存（双份）**：转写文本自动保存到应用私有文件，也可由用户通过系统目录选择器指定保存目录。原始 ASR 结果与 LLM 润色后的正式稿**分别保存为两份文件**，互不覆盖。
-- **LLM 润色可开关**：在设置页可关闭本地 LLM 语义润色，关闭后仅保留实时原始转写（不加载 LLM 引擎、不做分段润色）。
+- **实时保存**：转写文本自动保存到应用私有文件，也可由用户通过系统文件选择器直接指定保存文件（默认文件名带时间戳，便于快速创建非同名文件）。
+- **会话总结**：采集停止后，可调用本地 LLM 对本次会话的完整转写内容做总结，并保存到文件。
 
 ---
 
@@ -128,9 +128,9 @@ flowchart TB
 | `SileroVadWrapper` | `SileroVadWrapper.kt` | **「现在有人说话吗？」的判断器（语音活动检测 / VAD）**。它一帧一帧地听音频，只回答一个问题：当前这 32 毫秒里到底有没有人在讲话。这样就能把安静的片段丢掉，只把真正有语音的部分交给后面的识别模块，省电也省算力。 |
 | `WhisperWrapper` | `WhisperWrapper.kt` | **「把声音变成文字」的听写员（语音识别 / ASR）**。它接收上面筛出来的语音片段，输出成文字。支持中文、英文、日文、韩文等多语种；具体用哪个模型（Whisper 还是 SenseVoice）由文件夹里实际存在的模型文件自动决定。 |
 | `SpeakerDiarizationManager`（含 SCD） | `SpeakerDiarizationManager.kt`、<br/>`SpeakerChangeDetector.kt` | **「这句话是谁说的？」的辨认器（说话人分离 / Diarization）**。它给每个人的声音提取一个「声纹指纹」并记住，从而把转写结果标注成「说话人 1 / 说话人 2……」。其中的 SCD（换人检测）专门处理两人无缝接话、中间没有停顿的情况，强制把前后两句话分给不同人，避免被误并成一段。 |
-| `LocalLlmManager` | `LocalLlmManager.kt` | **「润色编辑」**。原始识别出来的文字往往没有标点、句子乱断。它用设备端的小模型（MiniCPM5 1B）把零散句子整理成有标点、分段清晰的易读稿。这一步可开关；关掉后只保留原始转写、不加载该模型。 |
+| `LocalLlmManager` | `LocalLlmManager.kt` | **「总结助手」**。采集停止后，它用设备端的小模型（MiniCPM5 1B）对本次会话的完整转写内容生成一段总结。 |
 | `ModelManager`（下载 / 解压） | `ModelManager.kt` | **「模型仓库管理员」**。AI 模型体积太大（几十 MB 到上 GB），不能塞进安装包。它负责在设置页里把模型下载下来、解压到位，并记录哪些模型已经装好可用。 |
-| `TranscriptionFileManager` | `TranscriptionFileManager.kt` | **「自动存档」**。转写过程中实时把文字写进文件，关掉 App 也不会丢；原始稿和润色后的正式稿分别存成两个文件，互不覆盖，方便事后对照。 |
+| `TranscriptionFileManager` | `TranscriptionFileManager.kt` | **「自动存档」**。转写过程中实时把文字写进文件，关掉 App 也不会丢；停止采集后的 LLM 总结也写入同一文件，方便事后查阅。 |
 
 > 用户界面（2.2 蓝色框）由 `MainActivity.kt`（Compose 导航）、`SettingsScreen.kt`（模型 / 音频源设置）、`TranscriptionState.kt`（跨组件共享的状态单例 Flow）组成；`TranscriptionApplication.kt` 持有 `ModelManager` 与 `TranscriptionFileManager` 单例并创建通知渠道。
 
@@ -153,7 +153,7 @@ flowchart TB
 | VAD | ONNX Runtime Android（+ Extensions） | 1.27.0 / 0.13.0 |
 | ASR | sherpa-onnx（k2-fsa） | v1.13.4 |
 | 说话人分离 | sherpa-onnx Speaker Embedding Extractor + ECAPA-TDNN 声纹模型 | v1.13.4 |
-| 本地 LLM 润色 | Google AI Edge LiteRT / LiteRT LM（含 GPU 后端） | 1.4.2 / 0.14.0 |
+| 本地 LLM | Google AI Edge LiteRT / LiteRT LM（含 GPU 后端） | 1.4.2 / 0.14.0 |
 
 ### 3.2 下载的模型资源
 
@@ -168,7 +168,7 @@ flowchart TB
 | [`sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2`](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2) | TAR.BZ2 | ~240MB | SenseVoice Small ASR（多语种）（**推荐**） |
 | [`3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx`](https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx) | ONNX | ~20MB | ECAPA-TDNN 说话人分离 |
 | [`3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx `](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models/3dspeaker_speech_eres2netv2_sv_zh-cn_16k-common.onnx ) | ONNX | ~70MB | ECAPA-TDNN 说话人分离 （**推荐**） |
-| [`minicpm_dynamic_wi8_afp32_gpu_opt.litertlm`](https://huggingface.co/litert-community/MiniCPM5-1B/resolve/main/minicpm_dynamic_wi8_afp32_gpu_opt.litertlm?download=true)（[`modelscope`](https://www.modelscope.cn/models/litert-community/MiniCPM5-1B/files)） | TFLite | ~1.0GB | MiniCPM5 1B 本地 LLM 润色 |
+| [`minicpm_dynamic_wi8_afp32_gpu_opt.litertlm`](https://huggingface.co/litert-community/MiniCPM5-1B/resolve/main/minicpm_dynamic_wi8_afp32_gpu_opt.litertlm?download=true)（[`modelscope`](https://www.modelscope.cn/models/litert-community/MiniCPM5-1B/files)） | TFLite | ~1.0GB | MiniCPM5 1B 本地 LLM（用于会话总结） |
 
 > Whisper / SenseVoice 解压后需含 `[prefix]-encoder.int8.onnx`、`[prefix]-decoder.int8.onnx`、`[prefix]-tokens.txt`（SenseVoice 为单 onnx）。模型存放于 `/data/user/0/com.zeerd.real_timetranscriptionapp/files/models/[model-id]/`。
 
@@ -218,15 +218,15 @@ flowchart TB
 
 ---
 
-## 6. 保存文件说明（双份落盘）
+## 6. 保存文件说明
 
-转写结果会**同时保存两份**，分别对应界面上的「实时流 (Raw)」与「正式稿 (Formal)」两个标签页：
+转写结果实时写入文件，界面展示「实时流 (Raw)」标签页：
 
-| 内容 | 内部私有文件 | 用户指定目录中的文件 |
+| 内容 | 内部私有文件 | 用户指定文件 |
 | :--- | :--- | :--- |
-| 原始 ASR 结果（润色前） | `files/autosave_transcription_raw.txt` | `<用户目录>/transcription_raw.txt` |
-| LLM 润色后的正式稿 | `files/autosave_transcription_formal.txt` | `<用户目录>/transcription_formal.txt` |
+| 实时转写（已按同说话人合并，含说话人标签） | `files/autosave_transcription_raw.txt` | 用户通过系统文件选择器（`CreateDocument`）直接指定的文件（默认名 `transcription_<时间戳>.txt`） |
+| 停止采集后的 LLM 总结 | 追加到文件末尾 | 追加到文件末尾 |
 
-- **默认（未指定目录）**：写入应用私有存储的两个文件，重启后自动恢复两个标签页的历史。
-- **指定目录**：点击右下角保存按钮，通过系统目录选择器（`OpenDocumentTree`）选择一个文件夹；应用会持久化该目录的读写权限，并在其中创建 `transcription_raw.txt` 与 `transcription_formal.txt` 两个文件，分别写入原始稿与正式稿。
-- 两份文件相互独立，正式稿不会覆盖原始稿，便于后续对照核对。
+- **默认（未指定文件）**：写入应用私有存储的 `autosave_transcription_raw.txt`，重启后自动恢复历史。
+- **指定文件**：点击右下角保存按钮，通过系统文件选择器（`CreateDocument`）直接选择一个文件（默认文件名带时间戳，便于快速创建非同名文件）；应用会持久化该文件的读写权限，后续转写与总结都写入此文件。
+- 总结以 `===== 摘要 (时间戳) =====` 分隔，便于事后查阅。

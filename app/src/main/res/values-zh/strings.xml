@@ -63,6 +63,11 @@
     <string name="speaker_diarization">说话人分离</string>
     <string name="speaker_diarization_desc">通过声纹识别不同说话人，在转写中显示「说话人 1」「说话人 2」等标签。</string>
     <string name="import_speaker_model">导入说话人模型（.onnx）</string>
+    <string name="reset_speaker_profiles">重置说话人画像</string>
+    <string name="reset_speaker_profiles_desc">清除当前模型的声纹特征与说话人命名，使分离从「说话人 1」重新开始。</string>
+    <string name="reset_speaker_title">重置说话人画像？</string>
+    <string name="reset_speaker_text">这将永久删除当前说话人模型已保存的声纹特征与说话人命名。下次录音将重新从头聚类说话人，且无法撤销。</string>
+    <string name="reset_speaker_no_model">当前未选择或未安装任何说话人模型。</string>
     <string name="local_llm">本地 LLM（LiteRT）</string>
     <string name="local_llm_desc">用于停止采集后对本次转写内容做总结。导入你自己的 .tflite 模型，或使用下方可选的默认链接。</string>
     <string name="import_litert_model">导入 LiteRT 模型（.tflite）</string>

@@ -64,6 +64,11 @@
     <string name="speaker_diarization">Speaker Diarization</string>
     <string name="speaker_diarization_desc">Identifies different speakers by voiceprint. Enables \"Speaker 1\", \"Speaker 2\" labels in transcripts.</string>
     <string name="import_speaker_model">Import Speaker Model (.onnx)</string>
+    <string name="reset_speaker_profiles">Reset Speaker Profiles</string>
+    <string name="reset_speaker_profiles_desc">Clear the saved voiceprint features and speaker names for the current model, so diarization starts fresh from "Speaker 1".</string>
+    <string name="reset_speaker_title">Reset Speaker Profiles?</string>
+    <string name="reset_speaker_text">This will permanently delete the saved voiceprint features and speaker names for the current speaker model. The next recording will re-cluster speakers from scratch. This cannot be undone.</string>
+    <string name="reset_speaker_no_model">No speaker model is currently selected or installed.</string>
     <string name="local_llm">Local LLM (LiteRT)</string>
     <string name="local_llm_desc">Used to summarize the captured transcript after stopping recording. Import your own .tflite model, or use the optional default link below.</string>
     <string name="import_litert_model">Import LiteRT Model (.tflite)</string>

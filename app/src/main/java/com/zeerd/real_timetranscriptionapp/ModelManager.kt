@@ -542,6 +542,43 @@ class ModelManager(private val context: Context) {
         _settingsChanged.update { it + 1 }
     }
 
+    /**
+     * 清空当前选中说话人模型的声纹画像与命名记录文件（speaker_profiles_*.bin、
+     * speaker_names_*.txt），使下次录音重新从「说话人 1」开始聚类。
+     * 直接按文件名前缀删除磁盘文件，无需依赖运行中的 SpeakerDiarizationManager 实例。
+     * 返回被删除的文件数（0 表示当前没有可用的说话人模型或文件不存在）。
+     */
+    fun clearCurrentSpeakerProfiles(): Int {
+        val selectedSpeakerId = getSelectedSpeakerModelId()
+        Log.i(TAG, "[SPEAKER_RESET] clearCurrentSpeakerProfiles selectedSpeakerId='$selectedSpeakerId'")
+        val candidateDirs = if (selectedSpeakerId.isNotEmpty()) {
+            listOf(getModelDir(selectedSpeakerId))
+        } else {
+            getModelDir("").listFiles()
+                ?.filter { it.isDirectory && (it.name == "speaker-ecapa" || it.name.startsWith("custom-speaker-")) }
+                ?: emptyList()
+        }
+        val speakerModel = candidateDirs
+            .mapNotNull { dir -> dir.listFiles()?.find { f -> f.name.endsWith(".onnx") } }
+            .firstOrNull { it.exists() }
+        if (speakerModel == null) {
+            Log.w(TAG, "[SPEAKER_RESET] No speaker model found, nothing to clear.")
+            return 0
+        }
+        val modelKey = speakerModel.nameWithoutExtension
+        var deleted = 0
+        File(context.filesDir, "speaker_profiles_$modelKey.bin").let {
+            if (it.exists() && it.delete()) deleted++
+        }
+        File(context.filesDir, "speaker_names_$modelKey.txt").let {
+            if (it.exists() && it.delete()) deleted++
+        }
+        // 同步清空内存中的命名映射（若 UI/Service 已加载该模型命名空间）
+        SpeakerNameStore.clearForModel(modelKey)
+        Log.i(TAG, "[SPEAKER_RESET] Cleared $deleted file(s) for model key: $modelKey")
+        return deleted
+    }
+
     fun getAudioSource(): Int = context.getSharedPreferences("settings", Context.MODE_PRIVATE).getInt("audio_source", MediaRecorder.AudioSource.VOICE_RECOGNITION)
     fun setAudioSource(source: Int) {
         val sourceName = when (source) {

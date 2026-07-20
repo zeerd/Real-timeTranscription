@@ -115,4 +115,13 @@ object SpeakerNameStore {
         model.save()
         Log.i(TAG, "Speaker names cleared for model: $activeKey")
     }
+
+    /** 按声纹模型 key 清空指定模型的命名（不依赖当前生效命名空间，供 ModelManager 直接调用）。 */
+    fun clearForModel(modelKey: String) {
+        val model = models[modelKey] ?: return
+        model.map.clear()
+        model.knownIds.clear()
+        model.save()
+        Log.i(TAG, "Speaker names cleared for model (by key): $modelKey")
+    }
 }

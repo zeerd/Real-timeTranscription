@@ -70,6 +70,9 @@ fun SettingsScreen(
     // Delete Confirmation Dialog
     var modelToDelete by remember { mutableStateOf<ModelInfo?>(null) }
 
+    // Reset Speaker Profiles Confirmation Dialog
+    var showResetSpeakerDialog by remember { mutableStateOf(false) }
+
     if (modelToDelete != null) {
         AlertDialog(
             onDismissRequest = { modelToDelete = null },
@@ -91,6 +94,36 @@ fun SettingsScreen(
                 TextButton(onClick = {
                     Log.d("SettingsScreen", "[USER_ACTION] Cancelled delete dialog for: ${modelToDelete?.id}")
                     modelToDelete = null
+                }) { Text(stringResource(R.string.cancel)) }
+            }
+        )
+    }
+
+    if (showResetSpeakerDialog) {
+        AlertDialog(
+            onDismissRequest = { showResetSpeakerDialog = false },
+            title = { Text(stringResource(R.string.reset_speaker_title)) },
+            text = { Text(stringResource(R.string.reset_speaker_text)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        Log.i("SettingsScreen", "[USER_ACTION] Confirmed reset speaker profiles")
+                        val deleted = modelManager.clearCurrentSpeakerProfiles()
+                        showResetSpeakerDialog = false
+                        Toast.makeText(
+                            context,
+                            if (deleted > 0) context.getString(R.string.import_success)
+                            else context.getString(R.string.reset_speaker_no_model),
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = Color.Red)
+                ) { Text(stringResource(R.string.clear)) }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    Log.d("SettingsScreen", "[USER_ACTION] Cancelled reset speaker profiles dialog")
+                    showResetSpeakerDialog = false
                 }) { Text(stringResource(R.string.cancel)) }
             }
         )
@@ -405,6 +438,25 @@ fun SettingsScreen(
                 modelManager.defaultDownloadLinks.filter { it.id == "speaker-ecapa" }.forEach { link ->
                     DownloadLinkRow(name = link.name, url = link.encoderUrl)
                 }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = {
+                        Log.d("SettingsScreen", "[USER_ACTION] Opening reset speaker profiles dialog")
+                        showResetSpeakerDialog = true
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.Red)
+                ) {
+                    Icon(Icons.Default.Delete, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(stringResource(R.string.reset_speaker_profiles))
+                }
+                Text(
+                    text = stringResource(R.string.reset_speaker_profiles_desc),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.Gray
+                )
             }
 
             // 只展示已安装且归类为说话人的模型（含历史遗留的 speaker-ecapa 等）。静态占位

@@ -25,7 +25,10 @@ class TranscriptionPipeline(
     private val vadWrapper: SileroVadWrapper,
     private val whisperWrapper: WhisperWrapper,
     private val resultChannel: Channel<AudioTextPair>,
-    private val speakerChangeDetector: SpeakerChangeDetector? = null
+    private val speakerChangeDetector: SpeakerChangeDetector? = null,
+    // 调试开关：开启时把每段切好的音频落盘为 WAV（文件名与记录文件时间戳一致）。
+    // 用 Provider 而非布尔，便于运行时随设置实时切换，无需重启管线。
+    private val dumpEnabledProvider: () -> Boolean = { false }
 ) {
     private val TAG = "TranscriptionPipeline"
     private val _vadState = MutableStateFlow(VadState.IDLE)
@@ -117,7 +120,7 @@ class TranscriptionPipeline(
                                 // 切出当前段（换人点之前的所有音频），保留新说话人音频到 buffer
                                 if (speechBuffer.size >= Constants.MIN_SPEECH_DURATION_SAMPLES) {
                                     val audioData = speechBuffer.toFloatArray()
-                                    // whisperWrapper.dumpWave(audioData, "scd")
+                                    if (dumpEnabledProvider()) whisperWrapper.dumpWave(audioData, segmentStartTimestampMs, "scd")
                                     val text = whisperWrapper.transcribe(audioData)
                                     val segEnd = System.currentTimeMillis()
                                     resultChannel.send(AudioTextPair(audioData, text, segmentStartTimestampMs, segEnd))
@@ -142,7 +145,7 @@ class TranscriptionPipeline(
                             if (speechBuffer.size >= Constants.MIN_SPEECH_DURATION_SAMPLES) {
                                 Log.d(TAG, "Cut triggered by $reason. Samples: ${speechBuffer.size}. Transcribing and sending.")
                                 val audioData = speechBuffer.toFloatArray()
-                                // whisperWrapper.dumpWave(audioData, reason.replace(" ", "_"))
+                                if (dumpEnabledProvider()) whisperWrapper.dumpWave(audioData, segmentStartTimestampMs, reason.replace(" ", "_"))
                                 val text = whisperWrapper.transcribe(audioData)
                                 val segEnd = System.currentTimeMillis()
                                 resultChannel.send(AudioTextPair(audioData, text, segmentStartTimestampMs, segEnd))

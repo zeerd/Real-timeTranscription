@@ -311,7 +311,7 @@ class TranscriptionService : Service() {
                 val speakerChangeDetector = diarizationManager?.let { dm ->
                     SpeakerChangeDetector(extractEmbedding = { audio -> dm.extractEmbeddingSafe(audio) })
                 }
-                val pipeline = TranscriptionPipeline(audioChannel, vad, whisper, transcriptionChannel, speakerChangeDetector)
+                val pipeline = TranscriptionPipeline(audioChannel, vad, whisper, transcriptionChannel, speakerChangeDetector) { modelManager.isDumpWavEnabled() }
 
                 observeJobs += pipeline.vadState.onEach { state ->
                     val recording = state == VadState.RECORDING

@@ -13,6 +13,8 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import java.util.Locale
 
 class TranscriptionFileManager(private val context: Context) {
@@ -140,4 +142,66 @@ class TranscriptionFileManager(private val context: Context) {
     }
 
     fun getDefaultFilePath(): String = defaultRawFile.absolutePath
+
+    // ===== 调试用 WAV 落盘管理 =====
+    // 与 TranscriptionService 中 whisper.dumpDir = File(filesDir, "wav_dump") 保持一致。
+    private val wavDumpDir: File = File(context.filesDir, "wav_dump")
+
+    /** 返回 WAV 落盘目录（可能不存在）。 */
+    fun getWavDumpDir(): File = wavDumpDir
+
+    /** 当前已保存的 WAV 段数。 */
+    suspend fun getWavDumpCount(): Int = withContext(Dispatchers.IO) {
+        if (!wavDumpDir.exists()) return@withContext 0
+        wavDumpDir.listFiles()?.count { it.isFile && it.name.endsWith(".wav", ignoreCase = true) } ?: 0
+    }
+
+    /**
+     * 把当前所有 WAV 段打包成一个 zip 文件，便于一键导出试听。
+     * @return 生成的 zip 文件（位于缓存目录），无 WAV 时返回 null。
+     */
+    suspend fun zipWavDumps(): File? = withContext(Dispatchers.IO) {
+        if (!wavDumpDir.exists()) return@withContext null
+        val wavs = wavDumpDir.listFiles()
+            ?.filter { it.isFile && it.name.endsWith(".wav", ignoreCase = true) }
+            ?: emptyList()
+        if (wavs.isEmpty()) return@withContext null
+
+        val zipFile = File(context.cacheDir, "wav_dump_${System.currentTimeMillis()}.zip")
+        try {
+            java.util.zip.ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
+                val buf = ByteArray(8192)
+                wavs.forEach { wav ->
+                    java.util.zip.ZipEntry(wav.name).also { zos.putNextEntry(it) }
+                    FileInputStream(wav).use { fis ->
+                        var len: Int
+                        while (fis.read(buf).also { len = it } > 0) {
+                            zos.write(buf, 0, len)
+                        }
+                    }
+                    zos.closeEntry()
+                }
+            }
+            Log.i(TAG, "Zipped ${wavs.size} WAV files into ${zipFile.absolutePath}")
+            zipFile
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to zip WAV dumps: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 清空所有已保存的 WAV 段文件。
+     * @return 被删除的文件数。
+     */
+    suspend fun clearWavDumps(): Int = withContext(Dispatchers.IO) {
+        if (!wavDumpDir.exists()) return@withContext 0
+        val wavs = wavDumpDir.listFiles()
+            ?.filter { it.isFile && it.name.endsWith(".wav", ignoreCase = true) }
+            ?: emptyList()
+        var deleted = 0
+        wavs.forEach { if (it.delete()) deleted++ }
+        Log.i(TAG, "Cleared $deleted WAV dump file(s)")
+        deleted
+    }
 }

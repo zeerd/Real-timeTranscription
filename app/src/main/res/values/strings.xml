@@ -93,4 +93,18 @@
     <string name="notification_recording">Recording and transcribing…</string>
     <string name="notification_listening">Listening…</string>
     <string name="notification_stop">Stop</string>
+
+    <!-- Debug WAV dump -->
+    <string name="debug_wav_title">Debug: Audio Segment WAV</string>
+    <string name="debug_wav_desc">When enabled, every cut audio segment is saved as a WAV file named with the same timestamp as in the transcript, for verifying missed words.</string>
+    <string name="dump_wav_enabled">Save segments as WAV</string>
+    <string name="dump_wav_enabled_desc">Off by default. Toggle on to start dumping segments.</string>
+    <string name="wav_dump_count">Saved segments: %1$d</string>
+    <string name="package_wav">Package &amp; Download</string>
+    <string name="clear_wav">Clear</string>
+    <string name="share_wav_zip">Share WAV archive</string>
+    <string name="no_wav_to_package">No WAV segments to package.</string>
+    <string name="clear_wav_title">Clear WAV segments?</string>
+    <string name="clear_wav_text">This will permanently delete %1$d saved WAV segment file(s). This cannot be undone.</string>
+    <string name="cleared_wav_count">Cleared %1$d WAV file(s).</string>
 </resources>

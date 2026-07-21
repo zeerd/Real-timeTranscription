@@ -4,6 +4,7 @@ import android.content.Intent
 import android.media.MediaRecorder
 import android.net.Uri
 import android.widget.Toast
+import java.io.File
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -20,6 +21,7 @@ import androidx.compose.material.icons.filled.Link
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.core.content.FileProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -50,6 +52,26 @@ fun SettingsScreen(
     val selectedAudioSource = remember { mutableIntStateOf(modelManager.getAudioSource()) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+
+    // 调试：把每段切好的音频落盘为 WAV（文件名与记录文件时间戳一致）
+    val dumpWavEnabled = remember { mutableStateOf(modelManager.isDumpWavEnabled()) }
+    // WAV 段数（用于 UI 展示与「一键打包/清除」前的提示）
+    var wavDumpCount by remember { mutableIntStateOf(0) }
+    // 打包下载中 / 清除中 的进度指示
+    var wavBusy by remember { mutableStateOf(false) }
+    // 打包下载完成后的 zip 文件，供分享/导出
+    var wavZipFile by remember { mutableStateOf<File?>(null) }
+    // 清除确认对话框
+    var showClearWavDialog by remember { mutableStateOf(false) }
+
+    // 进入设置页时刷新一次 WAV 段数
+    LaunchedEffect(Unit) {
+        wavDumpCount = context.let { ctx ->
+            (ctx as? ComponentActivity)?.let { act ->
+                (act.application as? TranscriptionApplication)?.fileManager?.getWavDumpCount() ?: 0
+            } ?: 0
+        }
+    }
 
     // 语言切换：当前选择 + 是否展开下拉
     val selectedLanguage = remember { mutableStateOf(LocaleHelper.getLanguage(context)) }
@@ -124,6 +146,39 @@ fun SettingsScreen(
                 TextButton(onClick = {
                     Log.d("SettingsScreen", "[USER_ACTION] Cancelled reset speaker profiles dialog")
                     showResetSpeakerDialog = false
+                }) { Text(stringResource(R.string.cancel)) }
+            }
+        )
+    }
+
+    if (showClearWavDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearWavDialog = false },
+            title = { Text(stringResource(R.string.clear_wav_title)) },
+            text = { Text(stringResource(R.string.clear_wav_text, wavDumpCount)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        Log.i("SettingsScreen", "[USER_ACTION] Confirmed clear WAV dumps (count=$wavDumpCount)")
+                        showClearWavDialog = false
+                        scope.launch {
+                            wavBusy = true
+                            val deleted = (context as? ComponentActivity)?.let { act ->
+                                (act.application as? TranscriptionApplication)?.fileManager?.clearWavDumps() ?: 0
+                            } ?: 0
+                            wavBusy = false
+                            wavDumpCount = 0
+                            wavZipFile = null
+                            Toast.makeText(context, context.getString(R.string.cleared_wav_count, deleted), Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = Color.Red)
+                ) { Text(stringResource(R.string.clear)) }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    Log.d("SettingsScreen", "[USER_ACTION] Cancelled clear WAV dumps dialog")
+                    showClearWavDialog = false
                 }) { Text(stringResource(R.string.cancel)) }
             }
         )
@@ -304,7 +359,6 @@ fun SettingsScreen(
                     }
                 }
             }
-
             item {
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
@@ -543,6 +597,112 @@ fun SettingsScreen(
                     },
                     onDelete = { modelToDelete = it }
                 )
+            }
+
+
+            item {
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = stringResource(R.string.debug_wav_title),
+                    style = MaterialTheme.typography.titleLarge
+                )
+                Text(
+                    text = stringResource(R.string.debug_wav_desc),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.Gray
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = stringResource(R.string.dump_wav_enabled),
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                Text(
+                                    text = stringResource(R.string.dump_wav_enabled_desc),
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                            Switch(
+                                checked = dumpWavEnabled.value,
+                                onCheckedChange = {
+                                    Log.i("SettingsScreen", "[USER_ACTION] Dump WAV toggled: $it")
+                                    dumpWavEnabled.value = it
+                                    modelManager.setDumpWavEnabled(it)
+                                }
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = stringResource(R.string.wav_dump_count, wavDumpCount),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    Log.i("SettingsScreen", "[USER_ACTION] Package WAV dumps")
+                                    scope.launch {
+                                        wavBusy = true
+                                        val file = (context as? ComponentActivity)?.let { act ->
+                                            (act.application as? TranscriptionApplication)?.fileManager?.zipWavDumps()
+                                        }
+                                        wavBusy = false
+                                        if (file != null) {
+                                            wavZipFile = file
+                                            wavDumpCount = (context as? ComponentActivity)?.let { act ->
+                                                (act.application as? TranscriptionApplication)?.fileManager?.getWavDumpCount() ?: 0
+                                            } ?: 0
+                                            val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
+                                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                                type = "application/zip"
+                                                putExtra(Intent.EXTRA_STREAM, uri)
+                                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                            }
+                                            context.startActivity(Intent.createChooser(shareIntent, context.getString(R.string.share_wav_zip)))
+                                        } else {
+                                            Toast.makeText(context, context.getString(R.string.no_wav_to_package), Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
+                                },
+                                enabled = !wavBusy && wavDumpCount > 0,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                if (wavBusy) {
+                                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                } else {
+                                    Icon(Icons.Default.FolderOpen, contentDescription = null)
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(stringResource(R.string.package_wav))
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    Log.i("SettingsScreen", "[USER_ACTION] Clear WAV dumps (count=$wavDumpCount)")
+                                    if (wavDumpCount > 0) showClearWavDialog = true
+                                },
+                                enabled = !wavBusy && wavDumpCount > 0,
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.Red)
+                            ) {
+                                Icon(Icons.Default.Delete, contentDescription = null)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(stringResource(R.string.clear_wav))
+                            }
+                        }
+                    }
+                }
             }
         }
     }

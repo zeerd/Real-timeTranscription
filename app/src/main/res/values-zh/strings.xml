@@ -92,4 +92,18 @@
     <string name="notification_recording">正在录音并转写…</string>
     <string name="notification_listening">正在聆听…</string>
     <string name="notification_stop">停止</string>
+
+    <!-- Debug WAV dump -->
+    <string name="debug_wav_title">调试：音频段 WAV</string>
+    <string name="debug_wav_desc">开启后，每一段切好的音频都会按记录文件内同样的时间戳命名并保存为 WAV 文件，便于核对是否漏字。</string>
+    <string name="dump_wav_enabled">保存音频段为 WAV</string>
+    <string name="dump_wav_enabled_desc">默认关闭。打开开关即开始落盘。</string>
+    <string name="wav_dump_count">已保存段数：%1$d</string>
+    <string name="package_wav">打包并下载</string>
+    <string name="clear_wav">清除</string>
+    <string name="share_wav_zip">分享 WAV 压缩包</string>
+    <string name="no_wav_to_package">没有可打包的 WAV 段。</string>
+    <string name="clear_wav_title">清除 WAV 段？</string>
+    <string name="clear_wav_text">这将永久删除 %1$d 个已保存的 WAV 段文件，且无法撤销。</string>
+    <string name="cleared_wav_count">已清除 %1$d 个 WAV 文件。</string>
 </resources>

@@ -10,6 +10,9 @@ import com.k2fsa.sherpa.onnx.OfflineSenseVoiceModelConfig
 import com.k2fsa.sherpa.onnx.OfflineWhisperModelConfig
 import java.io.File
 import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class WhisperWrapper(context: Context, modelId: String, modelDir: File) {
     private val recognizer: OfflineRecognizer
@@ -189,12 +192,15 @@ class WhisperWrapper(context: Context, modelId: String, modelDir: File) {
         }
     }
 
-    // 把每段音频落盘为 WAV，便于人工试听核对
-    fun dumpWave(audioData: FloatArray, tag: String) {
+    // 把每段音频落盘为 WAV，便于人工试听核对。
+    // 文件名使用与记录文件内一致的时间戳格式（yyyy-MM-dd HH:mm:ss），
+    // 这样 WAV 与转写文本可按时间一一对应。tag 用于区分切段原因（natural/max/scd）。
+    fun dumpWave(audioData: FloatArray, timestampMs: Long, tag: String) {
         val dir = dumpDir ?: return
         try {
             if (!dir.exists()) dir.mkdirs()
-            val file = File(dir, "seg_${System.currentTimeMillis()}_$tag.wav")
+            val ts = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(timestampMs))
+            val file = File(dir, "seg_${ts}_$tag.wav")
             writeWavFile(audioData, file)
             Log.d(TAG, "[WAV_DUMP] Saved ${audioData.size} samples to ${file.absolutePath}")
         } catch (e: Exception) {

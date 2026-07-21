@@ -592,4 +592,16 @@ class ModelManager(private val context: Context) {
         context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putInt("audio_source", source).apply()
         _settingsChanged.update { it + 1 }
     }
+
+    /**
+     * 调试开关：开启后，每一段切好的音频都会按记录文件内同样的时间戳命名并保存为 WAV 文件，
+     * 便于核对是否漏字。默认关闭。
+     */
+    fun isDumpWavEnabled(): Boolean =
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).getBoolean("dump_wav_enabled", false)
+    fun setDumpWavEnabled(enabled: Boolean) {
+        Log.i(TAG, "Setting dump WAV enabled to: $enabled")
+        context.getSharedPreferences("settings", Context.MODE_PRIVATE).edit().putBoolean("dump_wav_enabled", enabled).apply()
+        _settingsChanged.update { it + 1 }
+    }
 }

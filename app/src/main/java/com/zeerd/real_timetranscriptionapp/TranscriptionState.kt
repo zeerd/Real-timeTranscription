@@ -52,6 +52,13 @@ object TranscriptionState {
     private val _summarizing = MutableStateFlow(false)
     val summarizing = _summarizing.asStateFlow()
 
+    // 摘要生成进度描述（如 "正在分析第 2/8 段 (25%)"）与进度比例 (0.0f ~ 1.0f)
+    private val _summaryProgressText = MutableStateFlow<String?>(null)
+    val summaryProgressText = _summaryProgressText.asStateFlow()
+
+    private val _summaryProgressFraction = MutableStateFlow<Float?>(null)
+    val summaryProgressFraction = _summaryProgressFraction.asStateFlow()
+
     // 最近一次生成的 LLM 总结文本（用于 UI 即时展示）。
     private val _summaryResult = MutableStateFlow<String?>(null)
     val summaryResult = _summaryResult.asStateFlow()
@@ -87,6 +94,14 @@ object TranscriptionState {
 
     fun setSummarizing(active: Boolean) {
         _summarizing.value = active
+        if (!active) {
+            setSummaryProgress(null, null)
+        }
+    }
+
+    fun setSummaryProgress(text: String?, fraction: Float? = null) {
+        _summaryProgressText.value = text
+        _summaryProgressFraction.value = fraction
     }
 
     fun setSummaryResult(text: String?) {

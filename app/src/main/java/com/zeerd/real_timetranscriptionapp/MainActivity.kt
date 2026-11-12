@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
@@ -62,6 +63,9 @@ class MainActivity : ComponentActivity() {
     private val pendingSummaryText = mutableStateOf<String?>(null)
     // 最近一次生成的 LLM 总结文本；非空时在界面顶部展示
     private val summaryResult = mutableStateOf<String?>(null)
+    // 总结生成进度信息 (文本 + 比例)
+    private val summaryProgressText = mutableStateOf<String?>(null)
+    private val summaryProgressFraction = mutableStateOf<Float?>(null)
 
     private lateinit var app: TranscriptionApplication
 
@@ -114,6 +118,23 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
+                        val openRecordFileLauncher = rememberLauncherForActivityResult(
+                            contract = ActivityResultContracts.OpenDocument()
+                        ) { uri ->
+                            if (uri != null) {
+                                Log.d(TAG, "[USER_ACTION] User selected a record file to re-summarize: $uri")
+                                try {
+                                    contentResolver.takePersistableUriPermission(
+                                        uri,
+                                        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                                    )
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "Failed to take persistable URI permission: ${e.message}")
+                                }
+                                TranscriptionService.requestReSummary(this@MainActivity, uri)
+                            }
+                        }
+
                         Scaffold(
                             modifier = Modifier.fillMaxSize(),
                             floatingActionButton = {
@@ -143,6 +164,8 @@ class MainActivity : ComponentActivity() {
                                 isRecording = isRecording.value,
                                 isCapturing = isCapturing.value,
                                 summarizing = summarizing.value,
+                                summaryProgressText = summaryProgressText.value,
+                                summaryProgressFraction = summaryProgressFraction.value,
                                 pendingSummaryText = pendingSummaryText.value,
                                 summaryResult = summaryResult.value,
                                 onDismissSummaryDialog = {
@@ -171,6 +194,14 @@ class MainActivity : ComponentActivity() {
                                             transcriptions.clear()
                                         }
                                     }
+                                },
+                                onReSummarizeCurrent = {
+                                    Log.d(TAG, "[USER_ACTION] Re-summarizing current record file")
+                                    TranscriptionService.requestReSummary(this@MainActivity, null)
+                                },
+                                onReSummarizeChooseFile = {
+                                    Log.d(TAG, "[USER_ACTION] Opening picker to re-summarize record file")
+                                    openRecordFileLauncher.launch(arrayOf("text/plain", "*/*"))
                                 },
                                 modifier = Modifier.padding(innerPadding)
                             )
@@ -204,6 +235,12 @@ class MainActivity : ComponentActivity() {
         }
         lifecycleScope.launch {
             TranscriptionState.summarizing.collect { summarizing.value = it }
+        }
+        lifecycleScope.launch {
+            TranscriptionState.summaryProgressText.collect { summaryProgressText.value = it }
+        }
+        lifecycleScope.launch {
+            TranscriptionState.summaryProgressFraction.collect { summaryProgressFraction.value = it }
         }
         lifecycleScope.launch {
             TranscriptionState.pendingSummary.collect { text ->
@@ -266,6 +303,8 @@ fun TranscriptionScreen(
     isRecording: Boolean,
     isCapturing: Boolean,
     summarizing: Boolean,
+    summaryProgressText: String?,
+    summaryProgressFraction: Float?,
     pendingSummaryText: String?,
     summaryResult: String?,
     onDismissSummaryDialog: () -> Unit,
@@ -275,10 +314,48 @@ fun TranscriptionScreen(
     onStopCapture: () -> Unit,
     onConfirmSummary: (String) -> Unit,
     onResetHistory: () -> Unit,
+    onReSummarizeCurrent: () -> Unit,
+    onReSummarizeChooseFile: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var showResetDialog by remember { mutableStateOf(false) }
     var showSpeakersDialog by remember { mutableStateOf(false) }
+    var showReSummarizeDialog by remember { mutableStateOf(false) }
+
+    if (showReSummarizeDialog) {
+        AlertDialog(
+            onDismissRequest = { showReSummarizeDialog = false },
+            title = { Text(stringResource(R.string.re_summarize_title)) },
+            text = {
+                Column {
+                    TextButton(
+                        onClick = {
+                            showReSummarizeDialog = false
+                            onReSummarizeCurrent()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(stringResource(R.string.re_summarize_current))
+                    }
+                    TextButton(
+                        onClick = {
+                            showReSummarizeDialog = false
+                            onReSummarizeChooseFile()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(stringResource(R.string.re_summarize_choose))
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showReSummarizeDialog = false }) {
+                    Text(stringResource(R.string.cancel))
+                }
+            }
+        )
+    }
 
     if (showResetDialog) {
         AlertDialog(
@@ -335,10 +412,22 @@ fun TranscriptionScreen(
             onDismissRequest = { },
             title = { Text(stringResource(R.string.summarizing_title)) },
             text = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(modifier = Modifier.size(24.dp))
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text(stringResource(R.string.summarizing_text))
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = summaryProgressText ?: stringResource(R.string.summarizing_text),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    if (summaryProgressFraction != null) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        LinearProgressIndicator(
+                            progress = { summaryProgressFraction },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
                 }
             },
             confirmButton = { }
@@ -356,6 +445,14 @@ fun TranscriptionScreen(
                 style = MaterialTheme.typography.headlineSmall
             )
             Row {
+                IconButton(
+                    onClick = {
+                        Log.d(TAG, "[USER_ACTION] Re-summarize button pressed")
+                        showReSummarizeDialog = true
+                    }
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = stringResource(R.string.re_summarize))
+                }
                 IconButton(
                     onClick = {
                         Log.d(TAG, "[USER_ACTION] Manage speakers button pressed")

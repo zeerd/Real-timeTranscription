@@ -48,7 +48,6 @@ android {
     }
     packaging {
         jniLibs {
-            useLegacyPackaging = true
             pickFirsts += "**/libonnxruntime.so"
         }
     }
@@ -58,8 +57,6 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.commons.compress)
-    implementation(libs.onnx.android)
-    implementation(libs.onnx.ext)
     implementation(libs.sherpa.onnx)
     implementation(libs.litertlm)
     implementation(libs.litert.gpu)

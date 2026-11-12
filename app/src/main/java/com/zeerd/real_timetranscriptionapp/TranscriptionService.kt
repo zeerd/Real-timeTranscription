@@ -8,8 +8,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.net.Uri
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -99,6 +101,12 @@ class TranscriptionService : Service() {
                 val text = intent.getStringExtra(EXTRA_SUMMARY_TEXT) ?: ""
                 runSummary(text)
             }
+            ACTION_RE_SUMMARIZE -> {
+                // 用户请求重新对记录文件做摘要
+                val uriString = intent.getStringExtra(EXTRA_FILE_URI)
+                val uri = if (uriString != null) Uri.parse(uriString) else null
+                runReSummary(uri)
+            }
             else -> {
                 // 首次启动（无 action）：仅把服务挂到前台并恢复历史，不自动录音。
                 // 录音改为由 UI 的「开始」按钮手动触发，避免无界面时静默录音。
@@ -128,7 +136,24 @@ class TranscriptionService : Service() {
         }
     }
 
-    private fun buildNotification(isRecording: Boolean): Notification {
+    private inline fun <T> runWithWakeLock(tag: String, block: () -> T): T {
+        val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val wakeLock = powerManager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "RealtimeTranscription:$tag")
+        wakeLock?.acquire(15 * 60 * 1000L)
+        try {
+            return block()
+        } finally {
+            if (wakeLock?.isHeld == true) {
+                try {
+                    wakeLock.release()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to release wake lock", e)
+                }
+            }
+        }
+    }
+
+    private fun buildNotification(isRecording: Boolean, isSummarizing: Boolean = false): Notification {
         val openIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
             addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
         }
@@ -146,9 +171,15 @@ class TranscriptionService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val contentText = when {
+            isSummarizing -> "正在生成摘要…"
+            isRecording -> getString(R.string.notification_recording)
+            else -> getString(R.string.notification_listening)
+        }
+
         return NotificationCompat.Builder(this, TranscriptionApplication.NOTIFICATION_CHANNEL_ID)
             .setContentTitle(getString(R.string.notification_title))
-            .setContentText(if (isRecording) getString(R.string.notification_recording) else getString(R.string.notification_listening))
+            .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(contentIntent)
             .setOngoing(true)
@@ -157,10 +188,10 @@ class TranscriptionService : Service() {
             .build()
     }
 
-    private fun updateNotification(isRecording: Boolean) {
+    private fun updateNotification(isRecording: Boolean, isSummarizing: Boolean = false) {
         try {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.notify(TranscriptionApplication.NOTIFICATION_ID, buildNotification(isRecording))
+            nm.notify(TranscriptionApplication.NOTIFICATION_ID, buildNotification(isRecording, isSummarizing))
         } catch (e: Exception) {
             Log.w(TAG, "updateNotification failed: ${e.message}")
         }
@@ -420,6 +451,7 @@ class TranscriptionService : Service() {
     /**
      * 对本次采集会话的完整转写文本执行 LLM 摘要，并自动保存到文件。
      * 由 UI 在用户确认「停止后总结」时通过 [ACTION_SUMMARIZE] 触发。
+     * 在后台前台服务 + WakeLock 保障下执行，熄屏/切后台不中断。
      */
     private fun runSummary(text: String) {
         if (text.isBlank()) {
@@ -436,37 +468,118 @@ class TranscriptionService : Service() {
         }
 
         serviceScope.launch {
-            // 确保 LLM 引擎已就绪（复用管线里已初始化的实例，否则临时创建一个）
-            val mgr = llmManager ?: run {
-                val llmModelDir = modelManager.getModelDir(selectedLlmId)
-                LocalLlmManager(this@TranscriptionService, llmModelDir).also { llmManager = it }
-            }
-            // 等待引擎初始化完成（最多约 15s）
-            var waited = 0
-            while (!mgr.isEngineReady() && waited < 15000) {
-                delay(300)
-                waited += 300
-            }
-            if (!mgr.isEngineReady()) {
-                TranscriptionState.setSummarizing(false)
-                TranscriptionState.postMessage("LLM 引擎尚未就绪，无法生成摘要")
-                Log.w(TAG, "[SUMMARY] Engine not ready after waiting")
-                return@launch
-            }
+            runWithWakeLock("LlmSummary") {
+                // 确保 LLM 引擎已就绪（复用管线里已初始化的实例，否则临时创建一个）
+                val mgr = llmManager ?: run {
+                    val llmModelDir = modelManager.getModelDir(selectedLlmId)
+                    LocalLlmManager(this@TranscriptionService, llmModelDir).also { llmManager = it }
+                }
+                // 等待引擎初始化完成（最多约 15s）
+                var waited = 0
+                while (!mgr.isEngineReady() && waited < 15000) {
+                    delay(300)
+                    waited += 300
+                }
+                if (!mgr.isEngineReady()) {
+                    TranscriptionState.setSummarizing(false)
+                    updateNotification(isRecording = false, isSummarizing = false)
+                    TranscriptionState.postMessage("LLM 引擎尚未就绪，无法生成摘要")
+                    Log.w(TAG, "[SUMMARY] Engine not ready after waiting")
+                    return@runWithWakeLock
+                }
 
-            TranscriptionState.setSummarizing(true)
-            Log.i(TAG, "[SUMMARY] Starting summarization of ${text.length} chars")
-            val summary = mgr.summarize(text)
-            TranscriptionState.setSummarizing(false)
+                TranscriptionState.setSummarizing(true)
+                updateNotification(isRecording = false, isSummarizing = true)
+                Log.i(TAG, "[SUMMARY] Starting summarization of ${text.length} chars")
+                val summary = try {
+                    mgr.summarize(text) { current, total, desc ->
+                        val percent = (current * 100) / total
+                        TranscriptionState.setSummaryProgress("$desc ($percent%)", current.toFloat() / total)
+                    }
+                } finally {
+                    TranscriptionState.setSummarizing(false)
+                    updateNotification(isRecording = false, isSummarizing = false)
+                }
 
-            if (summary.isNotBlank()) {
-                val path = fileManager.saveSummary(summary)
-                TranscriptionState.setSummaryResult(summary)
-                TranscriptionState.postMessage("摘要已保存：$path")
-                Log.i(TAG, "[SUMMARY] Saved summary to $path")
-            } else {
-                TranscriptionState.postMessage("摘要生成失败，请重试")
-                Log.w(TAG, "[SUMMARY] summarize returned empty")
+                if (summary.isNotBlank()) {
+                    // 显式传 null：摘要写入「当前记录文件」（内部 autosave 或用户已选的保存文件），
+                    // 不依赖 saveSummary 的可变默认参数，避免写到其它文件。
+                    val path = fileManager.saveSummary(summary, targetUri = null, targetFile = null)
+                    TranscriptionState.setSummaryResult(summary)
+                    TranscriptionState.postMessage("摘要已保存：$path")
+                    Log.i(TAG, "[SUMMARY] Saved summary to $path")
+                } else {
+                    TranscriptionState.postMessage("摘要生成失败，请重试")
+                    Log.w(TAG, "[SUMMARY] summarize returned empty")
+                }
+            }
+        }
+    }
+
+    /**
+     * 对指定的记录文件（或当前记录文件）重新执行 LLM 摘要。
+     * 读取文件中的转写内容并生成摘要，追加到文件中并更新 UI 展示。
+     * 在后台前台服务 + WakeLock 保障下执行，熄屏/切后台不中断。
+     */
+    private fun runReSummary(uri: Uri? = null) {
+        val selectedLlmId = modelManager.getSelectedLlmModelId()
+        if (!modelManager.isModelReady(selectedLlmId)) {
+            Log.w(TAG, "runReSummary: LLM not available (ready=${modelManager.isModelReady(selectedLlmId)})")
+            TranscriptionState.postMessage("缺少可用的 LLM 模型，无法重新生成摘要")
+            return
+        }
+
+        serviceScope.launch {
+            runWithWakeLock("LlmReSummary") {
+                TranscriptionState.setSummarizing(true)
+                updateNotification(isRecording = false, isSummarizing = true)
+                val transcriptText = fileManager.readRecordContent(uri = uri)
+                if (transcriptText.isBlank()) {
+                    TranscriptionState.setSummarizing(false)
+                    updateNotification(isRecording = false, isSummarizing = false)
+                    Log.w(TAG, "runReSummary: Record file is empty or missing")
+                    TranscriptionState.postMessage("记录文件内容为空，无法生成摘要")
+                    return@runWithWakeLock
+                }
+
+                val mgr = llmManager ?: run {
+                    val llmModelDir = modelManager.getModelDir(selectedLlmId)
+                    LocalLlmManager(this@TranscriptionService, llmModelDir).also { llmManager = it }
+                }
+
+                var waited = 0
+                while (!mgr.isEngineReady() && waited < 15000) {
+                    delay(300)
+                    waited += 300
+                }
+
+                if (!mgr.isEngineReady()) {
+                    TranscriptionState.setSummarizing(false)
+                    updateNotification(isRecording = false, isSummarizing = false)
+                    TranscriptionState.postMessage("LLM 引擎尚未就绪，无法重新生成摘要")
+                    Log.w(TAG, "[RE_SUMMARY] Engine not ready after waiting")
+                    return@runWithWakeLock
+                }
+
+                Log.i(TAG, "[RE_SUMMARY] Starting re-summarization of ${transcriptText.length} chars")
+                val summary = try {
+                    fileManager.reSummarizeRecordFile(mgr, uri = uri) { current, total, desc ->
+                        val percent = (current * 100) / total
+                        TranscriptionState.setSummaryProgress("$desc ($percent%)", current.toFloat() / total)
+                    }
+                } finally {
+                    TranscriptionState.setSummarizing(false)
+                    updateNotification(isRecording = false, isSummarizing = false)
+                }
+
+                if (summary.isNotBlank()) {
+                    TranscriptionState.setSummaryResult(summary)
+                    TranscriptionState.postMessage("已重新生成摘要并保存")
+                    Log.i(TAG, "[RE_SUMMARY] Successfully re-summarized record file")
+                } else {
+                    TranscriptionState.postMessage("摘要生成失败，请重试")
+                    Log.w(TAG, "[RE_SUMMARY] reSummarizeRecordFile returned empty")
+                }
             }
         }
     }
@@ -495,7 +608,9 @@ class TranscriptionService : Service() {
         const val ACTION_START_CAPTURE = "com.zeerd.real_timetranscriptionapp.action.START_CAPTURE"
         const val ACTION_STOP_CAPTURE = "com.zeerd.real_timetranscriptionapp.action.STOP_CAPTURE"
         const val ACTION_SUMMARIZE = "com.zeerd.real_timetranscriptionapp.action.SUMMARIZE"
+        const val ACTION_RE_SUMMARIZE = "com.zeerd.real_timetranscriptionapp.action.RE_SUMMARIZE"
         const val EXTRA_SUMMARY_TEXT = "extra_summary_text"
+        const val EXTRA_FILE_URI = "extra_file_uri"
 
         /** 启动前台转写服务（幂等：若已在运行则仅触发一次管线同步检查）。 */
         fun start(context: Context) {
@@ -525,6 +640,17 @@ class TranscriptionService : Service() {
             val intent = Intent(context, TranscriptionService::class.java).apply {
                 action = ACTION_SUMMARIZE
                 putExtra(EXTRA_SUMMARY_TEXT, text)
+            }
+            context.startService(intent)
+        }
+
+        /** 用户请求重新对指定记录文件（或当前记录文件）生成摘要 */
+        fun requestReSummary(context: Context, uri: Uri? = null) {
+            val intent = Intent(context, TranscriptionService::class.java).apply {
+                action = ACTION_RE_SUMMARIZE
+                if (uri != null) {
+                    putExtra(EXTRA_FILE_URI, uri.toString())
+                }
             }
             context.startService(intent)
         }

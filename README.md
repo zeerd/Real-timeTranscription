@@ -30,7 +30,7 @@
 
 ### 2.1 技术栈
 
-- **语言**：Kotlin 2.2
+- **语言**：Kotlin 2.4
 - **UI**：Jetpack Compose（Material 3）+ Navigation Compose（单 Activity：`MainActivity`）
 - **并发模型**：Kotlin 协程（Coroutines）+ 通道（Channel），以「生产者-消费者」管线串联各处理阶段
 - **推理引擎**：ONNX Runtime（VAD）、sherpa-onnx（ASR）、Google AI Edge LiteRT（LLM）
@@ -150,10 +150,10 @@ flowchart TB
 
 | 核心能力 | 依赖 | 版本 |
 | :--- | :--- | :--- |
-| VAD | ONNX Runtime Android（+ Extensions） | 1.27.0 / 0.13.0 |
+| VAD | ONNX Runtime Android | 1.31.1 |
 | ASR | sherpa-onnx（k2-fsa） | v1.13.4 |
 | 说话人分离 | sherpa-onnx Speaker Embedding Extractor + ECAPA-TDNN 声纹模型 | v1.13.4 |
-| 本地 LLM | Google AI Edge LiteRT / LiteRT LM（含 GPU 后端） | 1.4.2 / 0.14.0 |
+| 本地 LLM | Google AI Edge LiteRT / LiteRT LM（含 GPU 后端） | 1.4.2 / 0.19.1 |
 
 ### 3.2 下载的模型资源
 

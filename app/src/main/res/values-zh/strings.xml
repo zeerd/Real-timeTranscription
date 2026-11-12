@@ -30,6 +30,10 @@
     <string name="summarizing_text">本地 LLM 正在总结转写内容，请稍候…</string>
     <string name="summary_title">本次会话摘要</string>
     <string name="dismiss_summary">关闭摘要</string>
+    <string name="re_summarize">重新生成摘要</string>
+    <string name="re_summarize_title">重新总结记录文件</string>
+    <string name="re_summarize_current">重新总结当前文件</string>
+    <string name="re_summarize_choose">选择外部记录文件…</string>
 
     <!-- Reset dialog -->
     <string name="clear_history_title">清除自动保存历史？</string>

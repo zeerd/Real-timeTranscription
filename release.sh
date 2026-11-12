@@ -1,3 +1,6 @@
+# 在 Android Studio 顶部菜单栏中，点击 Build -> Generate Signed Bundle / APK...
+# 如果忘了或者找不到了：android.jks 保存在云盘了。
+
 cd app/release
 apksigner verify --print-certs app-release.apk
 

@@ -189,23 +189,22 @@ fun SettingsScreen(
     ) { uri: Uri? ->
         if (uri != null) {
             Log.i("SettingsScreen", "[USER_ACTION] LiteRT model picker returned uri=$uri")
-            scope.launch {
-                try {
-                    val cursor = context.contentResolver.query(uri, null, null, null, null)
-                    val fileName = cursor?.use {
-                        if (it.moveToFirst()) {
-                            val nameIndex = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                            if (nameIndex != -1) it.getString(nameIndex) else "imported_model.tflite"
-                        } else "imported_model.tflite"
-                    } ?: "imported_model.tflite"
-                    
-                    Toast.makeText(context, context.getString(R.string.importing_file, fileName), Toast.LENGTH_SHORT).show()
-                    modelManager.importLiteRtModel(uri, fileName)
-                    Toast.makeText(context, context.getString(R.string.import_success), Toast.LENGTH_SHORT).show()
-                } catch (e: Exception) {
-                    Toast.makeText(context, context.getString(R.string.import_failed, e.message), Toast.LENGTH_LONG).show()
-                }
-            }
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (e: Exception) { /* ignore */ }
+
+            val cursor = context.contentResolver.query(uri, null, null, null, null)
+            val fileName = cursor?.use {
+                if (it.moveToFirst()) {
+                    val nameIndex = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (nameIndex != -1) it.getString(nameIndex) else "imported_model.tflite"
+                } else "imported_model.tflite"
+            } ?: "imported_model.tflite"
+
+            modelManager.importLiteRtModel(uri, fileName)
         }
     }
 
@@ -216,15 +215,14 @@ fun SettingsScreen(
     ) { uri: Uri? ->
         if (uri != null) {
             Log.i("SettingsScreen", "[USER_ACTION] ASR archive picker returned uri=$uri")
-            scope.launch {
-                try {
-                    Toast.makeText(context, context.getString(R.string.importing_archive), Toast.LENGTH_SHORT).show()
-                    modelManager.importAsrArchive(uri)
-                    Toast.makeText(context, context.getString(R.string.import_success), Toast.LENGTH_SHORT).show()
-                } catch (e: Exception) {
-                    Toast.makeText(context, "Import failed: ${e.message}", Toast.LENGTH_LONG).show()
-                }
-            }
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (e: Exception) { /* ignore */ }
+
+            modelManager.importAsrArchive(uri)
         }
     }
 
@@ -233,25 +231,23 @@ fun SettingsScreen(
     ) { uri: Uri? ->
         Log.i("SettingsScreen", "[SPEAKER_IMPORT] picker returned uri=$uri")
         if (uri != null) {
-            scope.launch {
-                try {
-                    val cursor = context.contentResolver.query(uri, null, null, null, null)
-                    val fileName = cursor?.use {
-                        if (it.moveToFirst()) {
-                            val nameIndex = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                            if (nameIndex != -1) it.getString(nameIndex) else "speaker_model.onnx"
-                        } else "speaker_model.onnx"
-                    } ?: "speaker_model.onnx"
-                    Log.i("SettingsScreen", "[SPEAKER_IMPORT] fileName=$fileName")
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (e: Exception) { /* ignore */ }
 
-                    Toast.makeText(context, context.getString(R.string.importing_file, fileName), Toast.LENGTH_SHORT).show()
-                    modelManager.importSingleFileModel(uri, fileName)
-                    Toast.makeText(context, context.getString(R.string.import_success), Toast.LENGTH_SHORT).show()
-                } catch (e: Exception) {
-                    Log.e("SettingsScreen", "[SPEAKER_IMPORT] failed", e)
-                    Toast.makeText(context, "Import failed: ${e.message}", Toast.LENGTH_LONG).show()
-                }
-            }
+            val cursor = context.contentResolver.query(uri, null, null, null, null)
+            val fileName = cursor?.use {
+                if (it.moveToFirst()) {
+                    val nameIndex = it.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                    if (nameIndex != -1) it.getString(nameIndex) else "speaker_model.onnx"
+                } else "speaker_model.onnx"
+            } ?: "speaker_model.onnx"
+            Log.i("SettingsScreen", "[SPEAKER_IMPORT] fileName=$fileName")
+
+            modelManager.importSingleFileModel(uri, fileName)
         }
     }
 

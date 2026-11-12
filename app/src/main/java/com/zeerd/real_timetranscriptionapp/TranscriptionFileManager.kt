@@ -2,7 +2,6 @@ package com.zeerd.real_timetranscriptionapp
 
 import android.content.Context
 import android.net.Uri
-import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
@@ -99,16 +98,116 @@ class TranscriptionFileManager(private val context: Context) {
     }
 
     /**
+     * 从指定 URI、File 或当前记录文件读取文本，并过滤掉已有摘要块，仅保留原始转写内容。
+     *
+     * @param uri SAF 文档 URI（若指定则优先从 URI 读取）
+     * @param file File 实例（若指定且 uri 为 null，则从 File 读取）
+     * @return 过滤后的纯转写文本
+     */
+    suspend fun readRecordContent(uri: Uri? = null, file: File? = null): String = withContext(Dispatchers.IO) {
+        val targetUri = uri ?: userSelectedFileUri
+        val targetFile = file ?: defaultRawFile
+
+        val rawText = try {
+            if (targetUri != null) {
+                context.contentResolver.openInputStream(targetUri)?.use { input ->
+                    input.bufferedReader().use { it.readText() }
+                } ?: ""
+            } else if (targetFile.exists()) {
+                targetFile.readText()
+            } else {
+                ""
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to read record file content: ${e.message}", e)
+            ""
+        }
+
+        extractTranscriptionOnly(rawText)
+    }
+
+    /**
+     * 过滤掉转写文本中的摘要块（以 `=====` 开头的块），避免重新总结时重复包含旧摘要。
+     *
+     * 解析规则：以「整行以 `=====` 开头」作为块分隔标记，而不是「进入/退出」状态机。
+     * 这样即使摘要正文自身包含 `=====` 分隔线，也只会被当作块边界，
+     * 不会把其后的原始转写内容一并吞掉。
+     */
+    fun extractTranscriptionOnly(fullText: String): String {
+        if (fullText.isBlank()) return ""
+        val resultLines = mutableListOf<String>()
+        var inSummaryBlock = false
+
+        for (line in fullText.lines()) {
+            val trimmed = line.trim()
+            if (trimmed.startsWith("=====")) {
+                // 分隔标记本身不入正文；翻转当前所在块
+                inSummaryBlock = !inSummaryBlock
+                continue
+            }
+            if (!inSummaryBlock) {
+                resultLines.add(line)
+            }
+        }
+        return resultLines.joinToString("\n").trim()
+    }
+
+    /**
      * 保存一次采集会话的 LLM 摘要，追加到同一个转写文件末尾（与原始稿合并，不再单开文件）。
      *
+     * 注意：targetUri / targetFile 必须显式传入，不要依赖默认值。
+     * 默认参数在调用点求值，若默认取可变的 [userSelectedFileUri]，会因调用时机不同
+     * 而把摘要写到错误的文件（例如「重新总结」选了外部文件后，再对当前会话总结）。
+     *
+     * @param targetUri 目标 SAF 文档 URI；为 null 时回退到 [defaultRawFile]
+     * @param targetFile 目标内部文件；为 null 时回退到 [defaultRawFile]
      * @return 实际写入的文件路径（内部回退）或 URI 描述，便于 UI 提示
      */
-    suspend fun saveSummary(text: String): String = withContext(Dispatchers.IO) {
+    suspend fun saveSummary(
+        text: String,
+        targetUri: Uri?,
+        targetFile: File?
+    ): String = withContext(Dispatchers.IO) {
         val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
         val entry = "\n===== 摘要 ($timestamp) =====\n\n$text\n\n"
-        Log.d(TAG, "saveSummary called (${text.length} chars)")
-        appendEntry(defaultRawFile, userSelectedFileUri, entry)
-        userSelectedFileUri?.toString() ?: defaultRawFile.absolutePath
+        Log.d(TAG, "saveSummary called (${text.length} chars), uri=$targetUri, file=${targetFile?.absolutePath}")
+        val uriToSave = targetUri ?: userSelectedFileUri
+        val fileToSave = targetFile ?: defaultRawFile
+        appendEntry(fileToSave, uriToSave, entry)
+        uriToSave?.toString() ?: fileToSave.absolutePath
+    }
+
+    /**
+     * 重新对记录文件生成摘要。
+     * 读取指定或默认记录文件中的转写内容，调用 [LocalLlmManager.summarize]，
+     * 并将生成的新摘要追加保存到文件中。
+     *
+     * @param llmManager 本地 LLM 管理器
+     * @param uri 可选的记录文件 URI
+     * @param file 可选的记录文件 File
+     * @param onProgress 可选的进度回调
+     * @return 生成的摘要文本；失败或无内容时返回空字符串
+     */
+    suspend fun reSummarizeRecordFile(
+        llmManager: LocalLlmManager,
+        uri: Uri? = null,
+        file: File? = null,
+        onProgress: ((current: Int, total: Int, description: String) -> Unit)? = null
+    ): String = withContext(Dispatchers.IO) {
+        val transcriptText = readRecordContent(uri = uri, file = file)
+        if (transcriptText.isBlank()) {
+            Log.w(TAG, "reSummarizeRecordFile: No transcription content found in record file")
+            return@withContext ""
+        }
+
+        Log.i(TAG, "reSummarizeRecordFile: Starting re-summarization of ${transcriptText.length} chars")
+        val newSummary = llmManager.summarize(transcriptText, onProgress = onProgress)
+        if (newSummary.isNotBlank()) {
+            val targetUri = uri ?: userSelectedFileUri
+            val targetFile = file ?: defaultRawFile
+            saveSummary(newSummary, targetUri = targetUri, targetFile = targetFile)
+        }
+        newSummary
     }
     
     fun getCurrentSaveLocation(): String {

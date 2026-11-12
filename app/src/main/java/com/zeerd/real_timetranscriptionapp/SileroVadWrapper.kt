@@ -2,28 +2,45 @@ package com.zeerd.real_timetranscriptionapp
 
 import android.content.Context
 import android.util.Log
-import ai.onnxruntime.OnnxTensor
-import ai.onnxruntime.OrtEnvironment
-import ai.onnxruntime.OrtSession
-import java.nio.FloatBuffer
+import com.k2fsa.sherpa.onnx.SileroVadModelConfig
+import com.k2fsa.sherpa.onnx.Vad
+import com.k2fsa.sherpa.onnx.VadModelConfig
+import java.io.File
+import java.io.FileOutputStream
 
 class SileroVadWrapper(context: Context) {
-    private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
-    private val session: OrtSession
     private val TAG = "SileroVadWrapper"
-
-    // Silero VAD v4 hidden states: h and c, each [2, 1, 64]
-    private var hState: FloatBuffer = FloatBuffer.allocate(2 * 1 * 64)
-    private var cState: FloatBuffer = FloatBuffer.allocate(2 * 1 * 64)
-    private val stateShape = longArrayOf(2, 1, 64)
+    private val vad: Vad
 
     init {
-        Log.i(TAG, "[V2_VAD] Initializing SileroVadWrapper (v4 mode)...")
+        Log.i(TAG, "[V2_VAD] Initializing SileroVadWrapper using sherpa-onnx Vad...")
         try {
-            val modelBytes = context.assets.open("silero_vad.onnx").readBytes()
-            session = env.createSession(modelBytes)
-            Log.i(TAG, "[V2_VAD] ONNX Session created. Inputs: ${session.inputNames}")
-            reset()
+            val vadFile = File(context.filesDir, "silero_vad.onnx")
+            if (!vadFile.exists()) {
+                context.assets.open("silero_vad.onnx").use { input ->
+                    FileOutputStream(vadFile).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+            }
+
+            val sileroVadConfig = SileroVadModelConfig(
+                model = vadFile.absolutePath,
+                threshold = 0.5f,
+                minSilenceDuration = 0.5f,
+                minSpeechDuration = 0.25f,
+                windowSize = 512,
+                maxSpeechDuration = 30.0f
+            )
+            val vadConfig = VadModelConfig(
+                sileroVadModelConfig = sileroVadConfig,
+                sampleRate = 16000,
+                numThreads = 1,
+                provider = "cpu",
+                debug = false
+            )
+            vad = Vad(null, vadConfig)
+            Log.i(TAG, "[V2_VAD] sherpa-onnx Vad initialized successfully.")
         } catch (e: Exception) {
             Log.e(TAG, "[V2_VAD] [FATAL_ERROR] Failed to initialize: ${e.message}", e)
             throw e
@@ -32,39 +49,7 @@ class SileroVadWrapper(context: Context) {
 
     fun isSpeech(audioFrame: FloatArray): Float {
         return try {
-            val inputShape = longArrayOf(1, audioFrame.size.toLong())
-            val inputTensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(audioFrame), inputShape)
-            
-            val hTensor = OnnxTensor.createTensor(env, hState, stateShape)
-            val cTensor = OnnxTensor.createTensor(env, cState, stateShape)
-            
-            val inputs = mutableMapOf(
-                "x" to inputTensor,
-                "h" to hTensor,
-                "c" to cTensor
-            )
-            
-            if (session.inputNames.contains("sr")) {
-                inputs["sr"] = OnnxTensor.createTensor(env, longArrayOf(16000))
-            }
-
-            session.run(inputs).use { results ->
-                val outputTensor = results[0] as OnnxTensor
-                val probability = outputTensor.floatBuffer.get(0)
-                
-                val hnTensor = results[1] as OnnxTensor
-                val cnTensor = results[2] as OnnxTensor
-                
-                hState.clear()
-                hState.put(hnTensor.floatBuffer)
-                hState.flip()
-                
-                cState.clear()
-                cState.put(cnTensor.floatBuffer)
-                cState.flip()
-                
-                probability
-            }
+            vad.compute(audioFrame)
         } catch (e: Exception) {
             Log.e(TAG, "[V2_VAD] Inference error: ${e.message}")
             0f
@@ -72,21 +57,18 @@ class SileroVadWrapper(context: Context) {
     }
 
     fun reset() {
-        Log.d(TAG, "Resetting VAD states (h and c)")
-        hState.clear()
-        while(hState.hasRemaining()) hState.put(0f)
-        hState.flip()
-        
-        cState.clear()
-        while(cState.hasRemaining()) cState.put(0f)
-        cState.flip()
+        Log.d(TAG, "Resetting VAD states")
+        try {
+            vad.clear()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error clearing VAD: ${e.message}")
+        }
     }
 
     fun close() {
         Log.d(TAG, "Closing VAD session")
         try {
-            session.close()
-            env.close()
+            vad.release()
         } catch (e: Exception) {
             Log.e(TAG, "Error closing VAD: ${e.message}")
         }

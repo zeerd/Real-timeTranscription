@@ -31,6 +31,10 @@
     <string name="summarizing_text">The local LLM is summarizing the transcript. Please wait…</string>
     <string name="summary_title">Session Summary</string>
     <string name="dismiss_summary">Dismiss summary</string>
+    <string name="re_summarize">Re-summarize</string>
+    <string name="re_summarize_title">Re-summarize Record File</string>
+    <string name="re_summarize_current">Re-summarize Current File</string>
+    <string name="re_summarize_choose">Choose External Record File…</string>
 
     <!-- Reset dialog -->
     <string name="clear_history_title">Clear Autosave History?</string>

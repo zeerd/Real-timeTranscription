@@ -28,7 +28,7 @@ Core features:
 
 ### 2.1 Tech Stack
 
-- **Language**: Kotlin 2.2
+- **Language**: Kotlin 2.4
 - **UI**: Jetpack Compose (Material 3) + Navigation Compose (single Activity: `MainActivity`)
 - **Concurrency model**: Kotlin Coroutines + Channels, connecting each processing stage via a "producer-consumer" pipeline
 - **Inference engines**: ONNX Runtime (VAD), sherpa-onnx (ASR), Google AI Edge LiteRT (LLM)
@@ -148,10 +148,10 @@ Taking the green "App Wrappers" box in 2.2 as a unit, the table below lists the 
 
 | Core Capability | Dependency | Version |
 | :--- | :--- | :--- |
-| VAD | ONNX Runtime Android (+ Extensions) | 1.27.0 / 0.13.0 |
+| VAD | ONNX Runtime Android | 1.31.1 |
 | ASR | sherpa-onnx (k2-fsa) | v1.13.4 |
 | Speaker Diarization | sherpa-onnx Speaker Embedding Extractor + ECAPA-TDNN voiceprint model | v1.13.4 |
-| Local LLM | Google AI Edge LiteRT / LiteRT LM (with GPU backend) | 1.4.2 / 0.14.0 |
+| Local LLM | Google AI Edge LiteRT / LiteRT LM (with GPU backend) | 1.4.2 / 0.19.1 |
 
 ### 3.2 Downloaded Model Resources
 

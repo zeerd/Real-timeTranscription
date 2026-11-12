@@ -3,7 +3,11 @@ package com.zeerd.real_timetranscriptionapp
 import android.content.Context
 import android.media.MediaRecorder
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
+import android.widget.Toast
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,7 +48,42 @@ class ModelManager(private val context: Context) {
     private val TAG = "ModelManager"
     private val rootDir = File(context.filesDir, "models")
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private val importScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val extractingModels = Collections.synchronizedSet(mutableSetOf<String>())
+
+    private inline fun <T> runWithWakeLock(tag: String, block: () -> T): T {
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val wakeLock = powerManager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "RealtimeTranscription:$tag")
+        wakeLock?.acquire(30 * 60 * 1000L)
+        try {
+            return block()
+        } finally {
+            if (wakeLock?.isHeld == true) {
+                try {
+                    wakeLock.release()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to release wake lock", e)
+                }
+            }
+        }
+    }
+
+    private fun showToast(message: String) {
+        Handler(Looper.getMainLooper()).post {
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun getFileSize(uri: Uri): Long {
+        return try {
+            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val idx = cursor.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                    if (idx != -1 && !cursor.isNull(idx)) cursor.getLong(idx) else 0L
+                } else 0L
+            } ?: 0L
+        } catch (e: Exception) { 0L }
+    }
 
     private val _customModels = MutableStateFlow<List<ModelInfo>>(emptyList())
 
@@ -253,16 +292,18 @@ class ModelManager(private val context: Context) {
         return false
     }
     
-    suspend fun importFromArchive(modelId: String, uri: Uri) = withContext(Dispatchers.IO) {
+    private suspend fun importFromArchive(modelId: String, uri: Uri) {
         val tempFile = File(context.cacheDir, "import_temp_${System.currentTimeMillis()}.tar.bz2")
         try {
             context.contentResolver.openInputStream(uri)?.use { input ->
                 FileOutputStream(tempFile).use { output -> input.copyTo(output) }
             }
             extractTarBz2(modelId, tempFile)
+            showToast(context.getString(R.string.import_success))
         } catch (e: Exception) {
             Log.e(TAG, "Import failed", e)
-            withContext(Dispatchers.Main) { _modelStatuses.update { it + (modelId to ModelStatus.ERROR) } }
+            _modelStatuses.update { it + (modelId to ModelStatus.ERROR) }
+            showToast(context.getString(R.string.import_failed, e.message ?: "Unknown error"))
         } finally {
             tempFile.delete()
         }
@@ -271,7 +312,8 @@ class ModelManager(private val context: Context) {
     // 内容驱动导入：不要求用户选择模型类型。压缩包里的 .onnx + tokens.txt 原样解压，
     // 模型类型由 WhisperWrapper 按文件内容自动识别。自动分配 custom-asr-<时间戳> 目录，
     // 将来新增任何 ASR 模型类型都无需改这里。导入开始即创建信息块并描画进度。
-    suspend fun importAsrArchive(uri: Uri) = withContext(Dispatchers.IO) {
+    // 在应用级别的 CoroutineScope + WakeLock 下后台执行，锁屏/切后台不中断。
+    fun importAsrArchive(uri: Uri) {
         val modelId = "custom-asr-${System.currentTimeMillis()}"
         val displayName = getDisplayName(uri)
         val name = displayName?.substringBeforeLast(".")?.takeIf { it.isNotBlank() } ?: "Imported ASR Model"
@@ -285,13 +327,20 @@ class ModelManager(private val context: Context) {
         registerCustomModel(info)
         _modelStatuses.update { it + (modelId to ModelStatus.EXTRACTING(-1f)) }
         Log.i(TAG, "[IMPORT_ASR] auto-assigned modelId=$modelId name=$name")
-        importFromArchive(modelId, uri)
-        discoverCustomModels()
+
+        importScope.launch {
+            showToast(context.getString(R.string.importing_archive))
+            runWithWakeLock("ImportAsrArchive") {
+                importFromArchive(modelId, uri)
+            }
+            discoverCustomModels()
+        }
     }
 
     // 导入单文件模型（如说话人 ECAPA .onnx）：生成独立的 custom-speaker-<name> 目录，
     // 使其作为独立信息块出现在设置页的 Speaker Diarization 分区。导入开始即创建信息块并描画进度。
-    suspend fun importSingleFileModel(uri: Uri, originalFileName: String) = withContext(Dispatchers.IO) {
+    // 在应用级别的 CoroutineScope + WakeLock 下后台执行，锁屏/切后台不中断。
+    fun importSingleFileModel(uri: Uri, originalFileName: String) {
         val baseName = originalFileName.substringBeforeLast(".")
         val modelId = "custom-speaker-${baseName.lowercase().replace(" ", "-")}"
         val info = ModelInfo(
@@ -302,27 +351,54 @@ class ModelManager(private val context: Context) {
             category = ModelCategory.SPEAKER
         )
         registerCustomModel(info)
-        _modelStatuses.update { it + (modelId to ModelStatus.EXTRACTING(-1f)) }
+        _modelStatuses.update { it + (modelId to ModelStatus.EXTRACTING(0f)) }
 
-        val modelDir = getModelDir(modelId)
-        if (!modelDir.exists()) modelDir.mkdirs()
-        val destFile = File(modelDir, originalFileName)
-        Log.i(TAG, "[IMPORT_SPEAKER] uri=$uri fileName=$originalFileName -> modelId=$modelId dest=${destFile.absolutePath}")
+        importScope.launch {
+            showToast(context.getString(R.string.importing_file, originalFileName))
+            runWithWakeLock("ImportSingleFileModel") {
+                val modelDir = getModelDir(modelId)
+                if (!modelDir.exists()) modelDir.mkdirs()
+                val destFile = File(modelDir, originalFileName)
+                Log.i(TAG, "[IMPORT_SPEAKER] uri=$uri fileName=$originalFileName -> modelId=$modelId dest=${destFile.absolutePath}")
 
-        try {
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(destFile).use { output -> input.copyTo(output) }
+                try {
+                    val totalSize = getFileSize(uri)
+                    var bytesCopied = 0L
+                    var lastUpdatePercent = -1
+
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        FileOutputStream(destFile).use { output ->
+                            val buffer = ByteArray(64 * 1024)
+                            var length: Int
+                            while (input.read(buffer).also { length = it } != -1) {
+                                output.write(buffer, 0, length)
+                                bytesCopied += length
+                                if (totalSize > 0) {
+                                    val percent = (bytesCopied * 100 / totalSize).toInt()
+                                    if (percent > lastUpdatePercent) {
+                                        lastUpdatePercent = percent
+                                        _modelStatuses.update { it + (modelId to ModelStatus.EXTRACTING(percent / 100f)) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Log.i(TAG, "[IMPORT_SPEAKER] Success: ${destFile.absolutePath} (${destFile.length()} bytes)")
+                    showToast(context.getString(R.string.import_success))
+                } catch (e: Exception) {
+                    Log.e(TAG, "[IMPORT_SPEAKER] Failed to import speaker model", e)
+                    _modelStatuses.update { it + (modelId to ModelStatus.ERROR) }
+                    showToast(context.getString(R.string.import_failed, e.message ?: "Unknown error"))
+                } finally {
+                    discoverCustomModels()
+                    refreshStatuses()
+                }
             }
-            Log.i(TAG, "[IMPORT_SPEAKER] Success: ${destFile.absolutePath} (${destFile.length()} bytes)")
-        } catch (e: Exception) {
-            Log.e(TAG, "[IMPORT_SPEAKER] Failed to import speaker model", e)
-            _modelStatuses.update { it + (modelId to ModelStatus.ERROR) }
-        } finally {
-            discoverCustomModels()
         }
     }
 
-    suspend fun importLiteRtModel(uri: Uri, originalFileName: String) = withContext(Dispatchers.IO) {
+    // 在应用级别的 CoroutineScope + WakeLock 下后台执行，锁屏/切后台不中断。
+    fun importLiteRtModel(uri: Uri, originalFileName: String) {
         val baseName = originalFileName.substringBeforeLast(".")
         val modelId = "custom-llm-${baseName.lowercase().replace(" ", "-")}"
         val info = ModelInfo(
@@ -333,23 +409,49 @@ class ModelManager(private val context: Context) {
             category = ModelCategory.LLM
         )
         registerCustomModel(info)
-        _modelStatuses.update { it + (modelId to ModelStatus.EXTRACTING(-1f)) }
+        _modelStatuses.update { it + (modelId to ModelStatus.EXTRACTING(0f)) }
 
-        val modelDir = File(rootDir, modelId)
-        if (!modelDir.exists()) modelDir.mkdirs()
+        importScope.launch {
+            showToast(context.getString(R.string.importing_file, originalFileName))
+            runWithWakeLock("ImportLiteRtModel") {
+                val modelDir = File(rootDir, modelId)
+                if (!modelDir.exists()) modelDir.mkdirs()
 
-        val destFile = File(modelDir, originalFileName)
+                val destFile = File(modelDir, originalFileName)
 
-        try {
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(destFile).use { output -> input.copyTo(output) }
+                try {
+                    val totalSize = getFileSize(uri)
+                    var bytesCopied = 0L
+                    var lastUpdatePercent = -1
+
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        FileOutputStream(destFile).use { output ->
+                            val buffer = ByteArray(64 * 1024)
+                            var length: Int
+                            while (input.read(buffer).also { length = it } != -1) {
+                                output.write(buffer, 0, length)
+                                bytesCopied += length
+                                if (totalSize > 0) {
+                                    val percent = (bytesCopied * 100 / totalSize).toInt()
+                                    if (percent > lastUpdatePercent) {
+                                        lastUpdatePercent = percent
+                                        _modelStatuses.update { it + (modelId to ModelStatus.EXTRACTING(percent / 100f)) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Log.d(TAG, "LiteRT model imported successfully to ${destFile.absolutePath}")
+                    showToast(context.getString(R.string.import_success))
+                } catch (e: Exception) {
+                    Log.e(TAG, "LiteRT model Import failed", e)
+                    _modelStatuses.update { it + (modelId to ModelStatus.ERROR) }
+                    showToast(context.getString(R.string.import_failed, e.message ?: "Unknown error"))
+                } finally {
+                    discoverCustomModels()
+                    refreshStatuses()
+                }
             }
-            Log.d(TAG, "LiteRT model imported successfully to ${destFile.absolutePath}")
-        } catch (e: Exception) {
-            Log.e(TAG, "LiteRT model Import failed", e)
-            _modelStatuses.update { it + (modelId to ModelStatus.ERROR) }
-        } finally {
-            discoverCustomModels()
         }
     }
 

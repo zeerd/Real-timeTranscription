@@ -3,8 +3,6 @@ package com.zeerd.real_timetranscriptionapp
 import android.content.Context
 import android.util.Log
 import com.google.ai.edge.litertlm.*
-import com.google.ai.edge.litertlm.ConversationConfig
-// import com.google.ai.edge.litertlm.Config.ThinkingConfig
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -155,13 +153,18 @@ class LocalLlmManager(private val context: Context, private val modelDir: File) 
     }
 
     /**
-     * 对一段完整文本做「总结摘要」。与 [regularizeInternal] 不同，这里允许对内容进行
-     * 概括与提炼，输出结构化的要点摘要，而非逐字保留。
+     * 对一段完整文本做「总结摘要」。如果文本超出了 LLM 的上下文窗口上限（如 > 3500 字符），
+     * 将采用分段提炼 (Map-Reduce) 策略，先对各片段生成子摘要，再对子摘要汇总提炼，
+     * 避免触发 LiteRT LM 的 Max Token Limit (4096 tokens) 错误。
      *
      * @param text 待总结的文本（通常是本次采集会话的全部转写内容）
+     * @param onProgress 进度回调 (当前步数, 总步数, 阶段描述)
      * @return LLM 生成的摘要；引擎未就绪或失败时返回空字符串
      */
-    suspend fun summarize(text: String): String = withContext(Dispatchers.Default) {
+    suspend fun summarize(
+        text: String,
+        onProgress: ((current: Int, total: Int, description: String) -> Unit)? = null
+    ): String = withContext(Dispatchers.Default) {
         val litertEngine = engine ?: run {
             Log.w(TAG, "[V2_LLM] Engine not initialized, skipping summarization")
             return@withContext ""
@@ -171,21 +174,127 @@ class LocalLlmManager(private val context: Context, private val modelDir: File) 
             return@withContext ""
         }
 
-        val systemPrompt = """
+        // 考虑到 4096 max token limit，以及 Prompt/System Prompt 占用的 token，
+        // 单次 Prompt 输入建议控制在 ~3500 字符以内（约 2000~2500 tokens）
+        val maxChunkChars = 3500
+
+        if (text.length <= maxChunkChars) {
+            onProgress?.invoke(1, 1, "正在生成摘要...")
+            return@withContext summarizeSingleChunk(litertEngine, text)
+        }
+
+        Log.i(TAG, "[V2_LLM] Text size (${text.length} chars) exceeds chunk threshold ($maxChunkChars), using Map-Reduce summarization")
+
+        // 1. 分切文本（按换行符划分段落）
+        val chunks = splitTextIntoChunks(text, maxChunkChars)
+        val totalSteps = chunks.size + 1
+        Log.i(TAG, "[V2_LLM] Split text into ${chunks.size} chunks for sub-summaries")
+
+        // 2. 对每个 chunk 逐个生成子摘要 (Map)
+        val subSummaries = mutableListOf<String>()
+        for ((index, chunk) in chunks.withIndex()) {
+            val step = index + 1
+            Log.i(TAG, "[V2_LLM] Summarizing chunk $step/${chunks.size} (${chunk.length} chars)")
+            onProgress?.invoke(step, totalSteps, "正在分析第 $step/${chunks.size} 段文本...")
+            val subSummary = summarizeSingleChunk(litertEngine, chunk, isSubSummary = true)
+            if (subSummary.isNotBlank()) {
+                subSummaries.add("【片段 $step 摘要】:\n$subSummary")
+            }
+        }
+
+        if (subSummaries.isEmpty()) {
+            Log.w(TAG, "[V2_LLM] All chunk summaries failed")
+            return@withContext ""
+        }
+
+        val combinedSubSummaries = subSummaries.joinToString("\n\n")
+        Log.i(TAG, "[V2_LLM] Combined sub-summaries size: ${combinedSubSummaries.length} chars")
+
+        // 3. 对子摘要结果进行最终汇总 (Reduce)
+        onProgress?.invoke(totalSteps, totalSteps, "正在整合最终总结...")
+        if (combinedSubSummaries.length > maxChunkChars) {
+            val truncated = combinedSubSummaries.take(maxChunkChars)
+            summarizeSingleChunk(litertEngine, truncated, isReducePass = true)
+        } else {
+            summarizeSingleChunk(litertEngine, combinedSubSummaries, isReducePass = true)
+        }
+    }
+
+    private suspend fun summarizeSingleChunk(
+        litertEngine: Engine,
+        text: String,
+        isSubSummary: Boolean = false,
+        isReducePass: Boolean = false
+    ): String {
+        val systemPrompt = when {
+            isSubSummary -> """
+你是一位专业的会议/对话记录整理助手。你的任务是将长文本中的局部转写内容，提炼为简短的要点概括。
+
+要求：
+1： 用简体中文输出。
+2： 提炼出本段落中的核心观点、结论或重要发言，使用 - 项目符号。
+3： 保持简明扼要（控制在 3~6 条要点内）。
+""".trimIndent()
+            isReducePass -> """
+你是一位专业的会议/对话记录整理助手。以下是根据长篇语音转写分段提炼的各个局部摘要。
+你的任务是将这些局部摘要整合为一份最终的完整会议/对话总结。
+
+要求：
+1： 用简体中文输出。
+2： 先给出一段 2~4 句话的总体概述，概括整场对话/会议的核心主题与结论。
+3： 随后汇总所有要点，归类整理为结构清晰的关键信息、决策与待办事项（使用 - 项目符号）。
+4： 去除各片段之间的重复信息。
+""".trimIndent()
+            else -> """
 你是一位专业的会议/对话记录整理助手。你的任务是将一段完整的语音转写文本，提炼为简洁、结构清晰的摘要。
 
-要求
+要求：
 1： 用简体中文输出（除非原文为英文，则保持英文）。
 2： 先给出一段 2~4 句话的总体概述，概括本次对话/会议的核心主题与结论。
 3： 随后以「要点」形式分条列出关键信息、决策、待办事项或重要结论（使用 - 项目符号）。
 4： 若涉及不同发言人，可在要点中标注其观点归属（如 [发言人姓名]）。
 5： 不要编造原文中不存在的信息；若内容过于零散无法归纳，可如实说明。
 """.trimIndent()
+        }
 
-        val prompt = "以下是本次采集的完整转写内容，请对其进行总结摘要：\n\n$text\n\n请输出摘要。/no_think"
+        val prompt = if (isReducePass) {
+            "以下是各段落的局部摘要，请整合生成一份最终总结：\n\n$text\n\n请输出最终摘要。/no_think"
+        } else {
+            "以下是转写内容，请对其进行总结摘要：\n\n$text\n\n请输出摘要。/no_think"
+        }
 
-        Log.i(TAG, "[V2_LLM] Starting summarization. Input size: ${text.length} chars")
-        runInference(litertEngine, systemPrompt, prompt)
+        Log.i(TAG, "[V2_LLM] Starting single-pass summarization. Input size: ${text.length} chars (isSubSummary=$isSubSummary, isReduce=$isReducePass)")
+        return runInference(litertEngine, systemPrompt, prompt)
+    }
+
+    /**
+     * 将长文本按段落 (换行符) 切分为若干不超过 [maxChars] 字符的 chunk。
+     */
+    private fun splitTextIntoChunks(text: String, maxChars: Int): List<String> {
+        val lines = text.lines()
+        val chunks = mutableListOf<String>()
+        val currentChunk = StringBuilder()
+
+        for (line in lines) {
+            if (currentChunk.length + line.length + 1 > maxChars && currentChunk.isNotEmpty()) {
+                chunks.add(currentChunk.toString().trim())
+                currentChunk.clear()
+            }
+            if (line.length > maxChars) {
+                var i = 0
+                while (i < line.length) {
+                    val end = (i + maxChars).coerceAtMost(line.length)
+                    chunks.add(line.substring(i, end))
+                    i = end
+                }
+            } else {
+                currentChunk.append(line).append("\n")
+            }
+        }
+        if (currentChunk.isNotBlank()) {
+            chunks.add(currentChunk.toString().trim())
+        }
+        return chunks
     }
 
     /**
@@ -200,13 +309,19 @@ class LocalLlmManager(private val context: Context, private val modelDir: File) 
         return try {
             var fullResponse = ""
             val startTime = System.currentTimeMillis()
-            val config = ConversationConfig(
-                systemInstruction = Contents.of(systemPrompt)
-            )
-            val conversation = litertEngine.createConversation(config)
+            
+            // 将 systemPrompt 拼接在 prompt 头部，避免 LiteRT LM 内部 Jinja 模板渲染 systemInstruction 时
+            // 抛出 "tried to use + operator on unsupported types string and sequence (in template:24)" 错误
+            val combinedPrompt = if (systemPrompt.isNotBlank()) {
+                "$systemPrompt\n\n$prompt"
+            } else {
+                prompt
+            }
+
+            val conversation = litertEngine.createConversation()
             try {
                 val responseBuilder = StringBuilder()
-                conversation?.sendMessageAsync(prompt)?.collect { partialResponse ->
+                conversation?.sendMessageAsync(combinedPrompt)?.collect { partialResponse ->
                     val partial = partialResponse.toString()
                     responseBuilder.append(partial)
                 }
